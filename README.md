@@ -1,3 +1,5 @@
+> 使用说明：先下载并解压 `MAA-LocalAI-progress-b9e7374.zip`，再在解压目录运行 `apply-overlay.ps1`。
+
 # MAA LocalAI + Auto-Push Progress
 
 这是一个面向 MAA `dev-v2` 的本地 AI 作战规划与自动推图扩展进度仓库。
