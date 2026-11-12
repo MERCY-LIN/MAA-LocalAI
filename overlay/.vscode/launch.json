@@ -1,0 +1,17 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "MAA LocalAI UI",
+            "type": "coreclr",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/bin/Debug/MAA.exe",
+            "args": [
+                "--skip-core-init"
+            ],
+            "cwd": "${workspaceFolder}/build/bin/Debug",
+            "console": "internalConsole",
+            "preLaunchTask": "LocalAI: verify"
+        }
+    ]
+}

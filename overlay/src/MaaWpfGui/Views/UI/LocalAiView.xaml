@@ -1,0 +1,268 @@
+<UserControl
+    x:Class="MaaWpfGui.Views.UI.LocalAiView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:c="clr-namespace:CalcBinding;assembly=CalcBinding"
+    xmlns:controls="clr-namespace:MaaWpfGui.Styles.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:hc="https://handyorg.github.io/handycontrol"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:s="https://github.com/canton7/Stylet"
+    xmlns:ui_vms="clr-namespace:MaaWpfGui.ViewModels.UI"
+    d:Background="White"
+    d:DataContext="{d:DesignInstance {x:Type ui_vms:LocalAiViewModel}}"
+    d:DesignHeight="600"
+    d:DesignWidth="900"
+    mc:Ignorable="d">
+    <hc:ScrollViewer
+        HorizontalScrollBarVisibility="Disabled"
+        IsInertiaEnabled="True"
+        VerticalScrollBarVisibility="Auto">
+        <StackPanel Margin="26,18,26,26">
+            <controls:TextBlock
+                FontSize="22"
+                Style="{StaticResource TextBlockDefaultBold}"
+                Text="{DynamicResource LocalAi.Title}" />
+            <controls:TextBlock
+                MaxWidth="760"
+                Margin="0,6,0,18"
+                HorizontalAlignment="Left"
+                Opacity="0.72"
+                Text="{DynamicResource LocalAi.Description}"
+                TextWrapping="Wrap" />
+
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="3*" />
+                    <ColumnDefinition Width="18" />
+                    <ColumnDefinition Width="2*" />
+                </Grid.ColumnDefinitions>
+
+                <Border
+                    Grid.Column="0"
+                    Padding="18"
+                    Background="{DynamicResource RegionBrushOpacity50}"
+                    CornerRadius="8">
+                    <StackPanel>
+                        <controls:TextBlock
+                            Margin="0,0,0,14"
+                            FontSize="16"
+                            Style="{StaticResource TextBlockDefaultBold}"
+                            Text="{DynamicResource LocalAi.Connection.Title}" />
+
+                        <controls:TextBlock
+                            Margin="0,0,0,5"
+                            Text="{DynamicResource LocalAi.Endpoint}" />
+                        <TextBox
+                            Height="32"
+                            hc:InfoElement.Placeholder="http://127.0.0.1:11434/v1"
+                            Text="{Binding Endpoint, UpdateSourceTrigger=PropertyChanged}" />
+                        <controls:TextBlock
+                            Margin="0,5,0,12"
+                            Opacity="0.62"
+                            Text="{DynamicResource LocalAi.Endpoint.Tip}"
+                            TextWrapping="Wrap" />
+
+                        <controls:TextBlock
+                            Margin="0,0,0,5"
+                            Text="{DynamicResource LocalAi.Model}" />
+                        <TextBox
+                            Height="32"
+                            hc:InfoElement.Placeholder="huihui_ai/qwen3-abliterated:14b-v2-q4_K_M"
+                            Text="{Binding Model, UpdateSourceTrigger=PropertyChanged}" />
+                        <controls:TextBlock
+                            Margin="0,5,0,12"
+                            Opacity="0.62"
+                            Text="{DynamicResource LocalAi.Model.Tip}"
+                            TextWrapping="Wrap" />
+
+                        <Grid Margin="0,0,0,12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <controls:TextBlock
+                                VerticalAlignment="Center"
+                                Text="{DynamicResource LocalAi.Timeout}" />
+                            <hc:NumericUpDown
+                                Grid.Column="1"
+                                Width="110"
+                                Height="30"
+                                Maximum="600"
+                                Minimum="5"
+                                Value="{Binding TimeoutSeconds, UpdateSourceTrigger=PropertyChanged}" />
+                        </Grid>
+
+                        <CheckBox
+                            Margin="0,0,0,14"
+                            Content="{DynamicResource LocalAi.AllowRemote}"
+                            IsChecked="{Binding AllowRemoteEndpoint}" />
+                        <controls:TextBlock
+                            Margin="0,0,0,16"
+                            Opacity="0.62"
+                            Text="{DynamicResource LocalAi.AllowRemote.Tip}"
+                            TextWrapping="Wrap" />
+
+                        <controls:TextBlock
+                            Margin="0,0,0,5"
+                            Text="{DynamicResource LocalAi.Goal}" />
+                        <TextBox
+                            MinHeight="108"
+                            AcceptsReturn="True"
+                            hc:InfoElement.Placeholder="{DynamicResource LocalAi.Goal.Placeholder}"
+                            Text="{Binding Goal, UpdateSourceTrigger=PropertyChanged}"
+                            TextWrapping="Wrap"
+                            VerticalScrollBarVisibility="Auto" />
+
+                        <Grid Margin="0,16,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Button
+                                MinWidth="96"
+                                Height="34"
+                                Command="{s:Action TestConnection}"
+                                Content="{DynamicResource LocalAi.TestConnection}"
+                                IsEnabled="{c:Binding !IsBusy}" />
+                            <Button
+                                Grid.Column="1"
+                                MinWidth="118"
+                                Height="34"
+                                Margin="10,0,0,0"
+                                Command="{s:Action GeneratePlan}"
+                                Content="{DynamicResource LocalAi.Generate}"
+                                IsEnabled="{c:Binding !IsBusy}" />
+                            <hc:LoadingCircle
+                                Grid.Column="2"
+                                Width="22"
+                                Height="22"
+                                Margin="12,0,0,0"
+                                HorizontalAlignment="Left"
+                                VerticalAlignment="Center"
+                                Visibility="{c:Binding IsBusy}" />
+                        </Grid>
+                    </StackPanel>
+                </Border>
+
+                <Border
+                    Grid.Column="2"
+                    Padding="18"
+                    Background="{DynamicResource RegionBrushOpacity50}"
+                    CornerRadius="8">
+                    <StackPanel>
+                        <controls:TextBlock
+                            Margin="0,0,0,12"
+                            FontSize="16"
+                            Style="{StaticResource TextBlockDefaultBold}"
+                            Text="{DynamicResource LocalAi.Plan.Title}" />
+
+                        <controls:TextBlock
+                            MinHeight="22"
+                            Margin="0,0,0,5"
+                            Style="{StaticResource TextBlockDefaultBold}"
+                            Text="{Binding Summary}"
+                            TextWrapping="Wrap" />
+                        <controls:TextBlock
+                            MinHeight="56"
+                            MaxHeight="120"
+                            Margin="0,0,0,12"
+                            Opacity="0.72"
+                            Text="{Binding Reason}"
+                            TextWrapping="Wrap" />
+
+                        <ListBox
+                            MaxHeight="270"
+                            HorizontalContentAlignment="Stretch"
+                            ItemsSource="{Binding PlanStages}"
+                            ScrollViewer.VerticalScrollBarVisibility="Auto"
+                            Style="{DynamicResource NoSelectedHighlightListBoxStyle}">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <Border
+                                        Margin="0,0,0,6"
+                                        Padding="8"
+                                        Background="{DynamicResource RegionBrushOpacity25}"
+                                        CornerRadius="5">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <CheckBox
+                                                VerticalAlignment="Top"
+                                                IsChecked="{Binding IsSelected}" />
+                                            <StackPanel Grid.Column="1" Margin="5,0,0,0">
+                                                <controls:TextBlock
+                                                    Style="{StaticResource TextBlockDefaultBold}"
+                                                    Text="{Binding Display}" />
+                                                <controls:TextBlock
+                                                    FontFamily="Consolas"
+                                                    Opacity="0.72"
+                                                    Text="{Binding Code}" />
+                                                <controls:TextBlock
+                                                    MaxHeight="42"
+                                                    Margin="0,3,0,0"
+                                                    Opacity="0.58"
+                                                    Text="{Binding Tip}"
+                                                    TextTrimming="CharacterEllipsis"
+                                                    TextWrapping="Wrap" />
+                                            </StackPanel>
+                                        </Grid>
+                                    </Border>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+
+                        <Grid Margin="0,10,0,0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <controls:TextBlock
+                                VerticalAlignment="Center"
+                                Text="{DynamicResource LocalAi.Times}" />
+                            <hc:NumericUpDown
+                                Grid.Column="1"
+                                Width="110"
+                                Height="30"
+                                Maximum="99"
+                                Minimum="1"
+                                Value="{Binding SuggestedTimes, UpdateSourceTrigger=PropertyChanged}" />
+                        </Grid>
+
+                        <Button
+                            Height="38"
+                            Margin="0,14,0,0"
+                            Command="{s:Action ApplyPlan}"
+                            Content="{DynamicResource LocalAi.Apply}"
+                            IsEnabled="{Binding CanApply}" />
+
+                        <controls:TextBlock
+                            Margin="0,12,0,0"
+                            Opacity="0.66"
+                            Text="{DynamicResource LocalAi.Apply.Tip}"
+                            TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <Border
+                Margin="0,16,0,0"
+                Padding="12,9"
+                Background="{DynamicResource RegionBrushOpacity25}"
+                CornerRadius="6">
+                <controls:TextBlock
+                    Text="{Binding StatusMessage}"
+                    TextWrapping="Wrap" />
+            </Border>
+
+            <controls:TextBlock
+                Margin="0,12,0,0"
+                Opacity="0.55"
+                Text="{DynamicResource LocalAi.Safety.Tip}"
+                TextWrapping="Wrap" />
+        </StackPanel>
+    </hc:ScrollViewer>
+</UserControl>

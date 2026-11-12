@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "maa-auto-push"
+version = "0.1.0"
+description = "Local-first planning and automation core for MAA auto-push"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy>=2.0",
+    "opencv-python-headless>=4.10"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.4,<10",
+    "ruff==0.14.10"
+]
+
+[project.scripts]
+maa-autopush = "autopush.cli:main"
+maa-autopush-debug = "autopush.debug_cli:main"
+
+[tool.setuptools.packages.find]
+include = ["autopush*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -1,73 +1,78 @@
-> 使用说明：先下载并解压 `MAA-LocalAI-progress-b9e7374.zip`，再在解压目录运行 `apply-overlay.ps1`。
+# MAA-LocalAI
 
-# MAA LocalAI + Auto-Push Progress
+MAA-LocalAI 是基于 MAA `dev-v2` 的 overlay 源码仓，目标链路为：
 
-这是一个面向 MAA `dev-v2` 的本地 AI 作战规划与自动推图扩展进度仓库。
+1. 用户指定关卡列表。
+2. 识别账号干员并筛选兼容的 Copilot 作业。
+3. 自动完成编队、正式作战和三星结果验证。
+4. 只有验证成功且现场状态可恢复时才继续下一关。
 
-当前仓库采用“overlay 补丁仓”形式，只保存新增和修改文件，不复制 MAA
-上游数 GB 的资源与二进制。基础提交记录在 `BASE_COMMIT.txt`。
+仓库不复制 MAA 上游数 GB 的源码、资源和二进制。`overlay/` 只保存本项目的
+新增或修改文件，应用基线固定记录在 `BASE_COMMIT.txt`。
 
-## 已实现
+## 当前状态
 
-- 本地 OpenAI 兼容模型作战规划，默认只允许 loopback 地址。
-- 模型输出经过关卡白名单、去重、数量上限和次数上限校验。
-- MAA `OperBox` 真实账号干员识别。
-- PRTS Plus 精确关卡作业查询与完整动作下载。
-- 真实阵容兼容性排序。
-- ADB 截图节流、输入、页面状态记忆和状态门控导航。
-- 先演习三星、再执行正式作战的有界试跑调度。
-- 每轮记录 Computer Use、截图、工具调用、DeepSeek Token、策略运行和测试结果。
-- Python 测试、LocalAI C# 契约测试、WPF 编译检查、VS Code 任务和 GitHub Actions。
+已纳入 Git 的功能：
 
-## 当前进度
+- 本地 OpenAI 兼容模型规划，默认仅允许 loopback 端点。
+- 模型计划经关卡白名单、去重、数量与次数上限校验。
+- MAA `OperBox` 账号识别、PRTS Plus 精确关卡作业查询。
+- 阵容兼容性排序、ADB 截图与状态门控导航。
+- 按数值 MaaCore 消息 ID 解析回调，关联 `taskid` 和 `taskchain`。
+- 独立的准备、执行、验证、成功、失败、停止、暂停、未知和预算耗尽阶段。
+- 截图序号、采集时间和动作序号；输入动作后强制使用新帧。
+- Python 调试执行器与 WPF 共享设备命名互斥量。
+- 正式单关默认直接作战、不使用理智药，Core 完成不等于三星。
+- JSON 调试入口：`doctor`、`snapshot`、`run-stage`、`status`、`events`、
+  `stop`、`replay`。
 
-- 已识别 328 名账号干员。
-- 已下载并排序 TL-9、TL-EX-1 至 TL-EX-8 的公开作业。
-- TL-9 首选作业 `108702` 与账号阵容匹配，但试跑未通过结果验证。
-- 运行包中的 `MaaCore.dll` 早于本地演习模式补丁。重建并同步 Core 和任务资源前，
-  自动试跑可能退回真实开战路径，因此目前不声明任何关卡已经三星通关。
-- 下一阶段是构建带 `exercise=true` 支持的 `MaaCore.dll`，验证演习入口后再继续
-  TL-9 和 EX 关卡。
+尚未完成：
 
-详见 `overlay/tools/auto-push/STATUS.md`。
+- 用户关卡列表到自动编队、作业筛选、连续推图和重启恢复的完整编排。
+- 战斗中“三星不可达”的实时判定。
+- 经画面验证的安全退出战斗。
+- 完整调度回放和 FlaUI 界面验证。
 
-## 应用方式
-
-先准备 MAA 源码：
+## 应用 overlay
 
 ```powershell
 git clone https://github.com/MaaAssistantArknights/MaaAssistantArknights.git MaaAssistantArknights
 git -C MaaAssistantArknights checkout bd8a2439ab0e7036aa460d4a89de8569a707f3a9
-```
 
-然后在本仓库根目录运行：
-
-```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\apply-overlay.ps1 `
   -TargetRepo "D:\path\to\MaaAssistantArknights"
 ```
 
-脚本只覆盖 `overlay/` 中列出的文件，不删除目标仓库中的其它内容。
+脚本会校验目标仓库 HEAD 是否与 `BASE_COMMIT.txt` 一致。上游升级完成并确认
+兼容后，才可使用 `-AllowDifferentBase`。
 
-## 验证
-
-应用后运行：
+## 调试入口
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass `
-  -File tools\localai-workflow\localai.ps1 verify
+  -File tools\localai-workflow\localai.ps1 debug doctor
+
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File tools\localai-workflow\localai.ps1 debug snapshot --stage act55side_08
+
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File tools\localai-workflow\localai.ps1 debug run-stage `
+  --stage act55side_08 `
+  --copilot "C:\path\to\job.json" `
+  --confirm-formal-battle
 ```
 
-本进度快照提交前已通过：
+运行证据写入 MAA 运行包的
+`data\autopush\evidence\<run_id>\`，不进入源码仓和 Git。
 
-- Python：23 项测试通过。
-- C# LocalAI 契约：8 项测试通过。
-- MaaWpfGui Debug 编译：0 warning，0 error。
+## 分支与验证
 
-## 边界
+- `debug`：调试 CLI、协议适配和故障路径修复。
+- `main`：仅在本地验证通过后由 `debug` 合并。
+- 修改源码后运行 `tools\localai-workflow\localai.ps1 verify`。
+- 涉及 MaaCore、任务资源或真实执行语义时，还必须完成 Debug 构建和实机链路验证。
 
-- 常规重复操作使用 ADB 或 MAA，不让模型逐帧分析截图。
-- Computer Use 次数不设全局硬上限，但必须计数，并逐步固化为本地自动化。
-- `TaskChainCompleted` 不等于三星通关，必须通过结算截图验证。
-- 默认不使用理智药或源石。
-- 本项目是 MAA 的衍生修改，遵循 AGPL-3.0-only；MAA 原始许可见 `LICENSE`。
+`TaskChainCompleted` 仅表示任务链结束，不能代替三星结算验证。停止、断连、
+跳过和未知结果均不得计为成功。默认不使用理智药和源石。
+
+本项目是 MAA 的衍生修改，遵循 AGPL-3.0-only。

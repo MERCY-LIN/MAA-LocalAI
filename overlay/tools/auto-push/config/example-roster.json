@@ -1,0 +1,39 @@
+{
+  "operators": [
+    {
+      "name": "圣聆初雪",
+      "elite": 2,
+      "level": 90,
+      "skill_level": 10,
+      "module_level": 2
+    },
+    {
+      "name": "桃金娘",
+      "elite": 2,
+      "level": 70,
+      "skill_level": 7,
+      "module_level": 1
+    },
+    {
+      "name": "克洛丝",
+      "elite": 1,
+      "level": 55,
+      "skill_level": 7,
+      "module_level": -1
+    },
+    {
+      "name": "芬",
+      "elite": 1,
+      "level": 55,
+      "skill_level": 1,
+      "module_level": -1
+    },
+    {
+      "name": "黑角",
+      "elite": 0,
+      "level": 30,
+      "skill_level": 1,
+      "module_level": -1
+    }
+  ]
+}

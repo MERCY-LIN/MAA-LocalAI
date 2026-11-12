@@ -1,0 +1,54 @@
+name: LocalAI Workflow
+
+on:
+  push:
+    paths:
+      - ".github/workflows/localai-workflow.yml"
+      - "src/MaaWpfGui/**"
+      - "src/MaaWpfGui.LocalAi.Tests/**"
+      - "tools/auto-push/**"
+      - "tools/localai-workflow/**"
+  pull_request:
+    paths:
+      - ".github/workflows/localai-workflow.yml"
+      - "src/MaaWpfGui/**"
+      - "src/MaaWpfGui.LocalAi.Tests/**"
+      - "tools/auto-push/**"
+      - "tools/localai-workflow/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: localai-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Auto-Push Python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: tools/auto-push/pyproject.toml
+      - name: Install tests
+        run: python -m pip install -e "./tools/auto-push[dev]"
+      - name: Run tests
+        run: python -m pytest tools/auto-push/tests
+
+  dotnet:
+    name: WPF and LocalAI contracts
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Restore tests
+        run: dotnet restore src/MaaWpfGui.LocalAi.Tests/MaaWpfGui.LocalAi.Tests.csproj -p:Platform=x64 -r win-x64
+      - name: Run tests
+        run: dotnet run --project src/MaaWpfGui.LocalAi.Tests/MaaWpfGui.LocalAi.Tests.csproj -c Debug -r win-x64 --no-restore -p:Platform=x64 -p:PostBuildEvent=

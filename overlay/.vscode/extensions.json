@@ -1,0 +1,11 @@
+{
+    "recommendations": [
+        "ms-dotnettools.csharp",
+        "ms-vscode.cmake-tools",
+        "ms-vscode.cpptools",
+        "ms-vscode.powershell",
+        "ms-python.python",
+        "charliermarsh.ruff",
+        "github.vscode-github-actions"
+    ]
+}
