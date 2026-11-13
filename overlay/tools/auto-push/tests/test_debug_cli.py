@@ -99,6 +99,7 @@ def test_default_adb_discovery_has_no_undefined_candidate(monkeypatch):
 def test_preflight_accepts_only_exact_target_stage_detail():
     assert _is_safe_preflight_state("stage_detail_act55side_ex05", "act55side_ex05")
     assert _is_safe_preflight_state("home", "act55side_ex05")
+    assert _is_safe_preflight_state("event_map", "act55side_ex06")
     assert not _is_safe_preflight_state(
         "stage_detail_act55side_ex04",
         "act55side_ex05",
@@ -194,6 +195,79 @@ def test_result_capture_polls_unknown_frames_without_touching_game(
     assert sleeps == [2.0, 2.0]
     assert (tmp_path / "result-wait-1.png").is_file()
     assert (tmp_path / "result-wait-2.png").is_file()
+
+
+def test_run_campaign_uses_deterministic_ranking_and_stops_on_success(
+    tmp_path: Path,
+    monkeypatch,
+):
+    (tmp_path / "adb.exe").write_bytes(b"adb")
+    jobs_root = tmp_path / "jobs"
+    (jobs_root / "act55side_ex06").mkdir(parents=True)
+    candidate = types.SimpleNamespace(
+        strategy=types.SimpleNamespace(
+            strategy_id=str(jobs_root / "act55side_ex06" / "job.json")
+        ),
+        runnable=True,
+        missing=(),
+        diagnostics=(),
+    )
+
+    monkeypatch.setattr(debug_cli, "load_roster", lambda _path: {})
+    monkeypatch.setattr(
+        debug_cli,
+        "collect_strategy_files",
+        lambda _paths: [Path(candidate.strategy.strategy_id)],
+    )
+    monkeypatch.setattr(
+        debug_cli,
+        "rank_strategies",
+        lambda *_args, **_kwargs: [candidate],
+    )
+    monkeypatch.setattr(
+        debug_cli,
+        "_run_stage",
+        lambda _arguments: (
+            {
+                "schema_version": "localai.debug/v1",
+                "command": "run-stage",
+                "status": "SUCCEEDED",
+                "run_id": "run-campaign",
+                "attempt_id": "attempt-campaign",
+                "data": {"outcome": "SUCCEEDED"},
+                "errors": [],
+            },
+            0,
+        ),
+    )
+
+    arguments = types.SimpleNamespace(
+        command="run-campaign",
+        confirm_formal_battle=True,
+        package_dir=str(tmp_path / "package"),
+        evidence_root=str(tmp_path / "evidence"),
+        dll=None,
+        resource_dir=None,
+        user_dir=None,
+        template_root=None,
+        state_memory_dir=None,
+        adb=str(tmp_path / "adb.exe"),
+        address="emulator-5554",
+        connect_config="General",
+        timeout=600,
+        stages=["act55side_ex06"],
+        jobs_root=str(jobs_root),
+        roster=str(tmp_path / "OperBoxData.json"),
+        operbox_data=None,
+        round_name="test-campaign",
+    )
+
+    envelope, exit_code = debug_cli._run_campaign(arguments)
+
+    assert exit_code == 0
+    assert envelope["status"] == "OK"
+    assert envelope["data"]["stages"][0]["stage"] == "act55side_ex06"
+    assert envelope["data"]["stages"][0]["status"] == "SUCCEEDED"
 
 
 def test_stop_records_unverified_safe_exit_without_adb(

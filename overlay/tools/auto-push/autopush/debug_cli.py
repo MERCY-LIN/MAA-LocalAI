@@ -42,9 +42,11 @@ from .maa_core import (
     summarize_events,
 )
 from .metrics import BudgetExceeded, BudgetLimits, RoundMetrics, TestResult
+from .planner import load_roster
 from .recognizer import decode_png
 from .state_memory import VisualStateMemory
 from .states import RunPhase
+from .strategy import collect_strategy_files, rank_strategies
 from .verifier import BattleResultVerifier
 
 
@@ -68,6 +70,7 @@ ACTIVE_STATUSES = {
 SAFE_PREFLIGHT_STATES = {
     "agreement",
     "credit_shop",
+    "event_map",
     "home",
     "settings",
     "terminal_protocol",
@@ -991,10 +994,10 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
         else:
             store.update_status(RunPhase.UNKNOWN, task=summary)
 
-        verification_status = verification.status if verification else "unknown"
         core_star_evidence = summary.get("maa_three_star_evidence") or []
         core_three_star = bool(summary.get("maa_three_star"))
-        if verification is None and core_three_star:
+        verification_status = verification.status if verification else "unknown"
+        if core_three_star:
             verification_status = "three_star"
         outcome = classify_outcome(
             stop_requested=stop_requested,
@@ -1005,26 +1008,22 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
             verification_status=verification_status,
         )
         verification_payload = (
-            asdict(verification)
-            if verification is not None
-            else (
-                {
-                    "status": "three_star",
-                    "stars": 3,
-                    "confidence": max(
-                        (
-                            float(item.get("score") or 0.0)
-                            for item in core_star_evidence
-                        ),
-                        default=0.0,
+            {
+                "status": "three_star",
+                "stars": 3,
+                "confidence": max(
+                    (
+                        float(item.get("score") or 0.0)
+                        for item in core_star_evidence
                     ),
-                    "evidence": core_star_evidence,
-                    "needs_computer_use": False,
-                    "source": "maa_core_stage_drops_stars_3",
-                }
-                if core_three_star
-                else None
-            )
+                    default=0.0,
+                ),
+                "evidence": core_star_evidence,
+                "needs_computer_use": False,
+                "source": "maa_core_stage_drops_stars_3",
+            }
+            if core_three_star
+            else (asdict(verification) if verification is not None else None)
         )
         if verification_payload is not None:
             write_json_atomic(
@@ -1359,6 +1358,133 @@ def _replay(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
     )
 
 
+def _run_campaign(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
+    """Run several formal clears deterministically, stopping on first failure."""
+
+    if not arguments.confirm_formal_battle:
+        raise EvidenceError(
+            "run-campaign requires --confirm-formal-battle after reviewing "
+            "the stage list and job root"
+        )
+    package_dir = _resolve(arguments.package_dir, _default_package_dir())
+    evidence_root = _resolve(arguments.evidence_root, _default_evidence_root())
+    dll_path = _resolve(arguments.dll, package_dir / "MaaCore.dll")
+    resource_dir = _resolve(arguments.resource_dir, package_dir / "resource")
+    user_dir = _resolve(arguments.user_dir, package_dir)
+    template_root = _resolve(
+        arguments.template_root,
+        package_dir / "resource" / "template" / "Battle",
+    )
+    state_memory_dir = _resolve(
+        arguments.state_memory_dir,
+        package_dir / "data" / "autopush" / "state-memory",
+    )
+    adb_path = _resolve(arguments.adb, Path(arguments.adb)) if arguments.adb else (
+        _default_adb()
+    )
+    if adb_path is None or not adb_path.is_file():
+        raise EvidenceError("ADB executable was not found")
+    roster = load_roster(arguments.roster)
+    jobs_root = Path(arguments.jobs_root).expanduser().resolve()
+    if not jobs_root.is_dir():
+        raise EvidenceError(f"jobs root is not a directory: {jobs_root}")
+
+    stage_results: list[dict[str, Any]] = []
+    for stage in arguments.stages:
+        jobs_dir = jobs_root / stage
+        if not jobs_dir.is_dir():
+            raise EvidenceError(f"no job directory for stage: {jobs_dir}")
+        metrics = RoundMetrics(
+            round_name=arguments.round_name,
+            stage=stage,
+            limits=BudgetLimits(
+                screenshots=16,
+                tool_calls=240,
+                strategy_runs=1,
+            ),
+        )
+        candidates = rank_strategies(
+            collect_strategy_files([jobs_dir]),
+            stage,
+            roster,
+            allow_support=False,
+            metrics=metrics,
+        )
+        eligible = [
+            candidate
+            for candidate in candidates
+            if candidate.runnable
+            and not candidate.missing
+            and not any(": elite " in item for item in candidate.diagnostics)
+        ]
+        if not eligible:
+            stage_results.append(
+                {
+                    "stage": stage,
+                    "status": "BLOCKED",
+                    "reason": "no runnable job satisfied hard requirements",
+                }
+            )
+            break
+        selected = eligible[0]
+        stage_namespace = argparse.Namespace(
+            command="run-stage",
+            stage=stage,
+            copilot=str(selected.strategy.strategy_id),
+            package_dir=str(package_dir),
+            evidence_root=str(evidence_root),
+            dll=str(dll_path),
+            resource_dir=str(resource_dir),
+            user_dir=str(user_dir),
+            template_root=str(template_root),
+            state_memory_dir=str(state_memory_dir),
+            adb=str(adb_path),
+            address=arguments.address,
+            connect_config=arguments.connect_config,
+            timeout=arguments.timeout,
+            formation=True,
+            formation_index=0,
+            add_trust=False,
+            ignore_requirements=True,
+            operbox_data=str(arguments.operbox_data or arguments.roster),
+            support_unit_usage=0,
+            confirm_formal_battle=True,
+        )
+        envelope, exit_code = _run_stage(stage_namespace)
+        stage_results.append(
+            {
+                "stage": stage,
+                "job": str(selected.strategy.strategy_id),
+                "run_id": envelope.get("run_id"),
+                "attempt_id": envelope.get("attempt_id"),
+                "status": envelope.get("status"),
+                "outcome": envelope.get("data", {}).get("outcome"),
+                "errors": envelope.get("errors", []),
+            }
+        )
+        if exit_code != 0:
+            break
+
+    succeeded = bool(stage_results) and all(
+        item.get("status") == "SUCCEEDED" for item in stage_results
+    )
+    return (
+        result_envelope(
+            "run-campaign",
+            "OK" if succeeded else "BLOCKED",
+            data={
+                "stages": stage_results,
+                "policy": {
+                    "sanity_potions": 0,
+                    "originite_prime": 0,
+                    "max_attempts_per_stage": 1,
+                },
+            },
+        ),
+        0 if succeeded else 2,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="maa-autopush-debug",
@@ -1417,6 +1543,32 @@ def build_parser() -> argparse.ArgumentParser:
     run_stage.add_argument("--support-unit-usage", type=int, default=0)
     run_stage.add_argument("--confirm-formal-battle", action="store_true")
     run_stage.set_defaults(handler=_run_stage)
+
+    run_campaign = subparsers.add_parser(
+        "run-campaign",
+        help="run several formal clears deterministically",
+    )
+    add_common(run_campaign)
+    run_campaign.add_argument("--stages", nargs="+", required=True)
+    run_campaign.add_argument("--jobs-root", required=True)
+    run_campaign.add_argument("--roster", required=True)
+    run_campaign.add_argument("--operbox-data")
+    run_campaign.add_argument("--dll")
+    run_campaign.add_argument("--resource-dir")
+    run_campaign.add_argument("--user-dir")
+    run_campaign.add_argument("--connect-config", default="General")
+    run_campaign.add_argument("--timeout", type=int, default=600)
+    run_campaign.add_argument("--template-root")
+    run_campaign.add_argument("--state-memory-dir")
+    run_campaign.add_argument(
+        "--round-name",
+        default="localai-debug-campaign",
+    )
+    run_campaign.add_argument(
+        "--confirm-formal-battle",
+        action="store_true",
+    )
+    run_campaign.set_defaults(handler=_run_campaign)
 
     status = subparsers.add_parser("status", help="read one run status")
     status.add_argument("--evidence-root", default=str(_default_evidence_root()))
