@@ -8,6 +8,7 @@ from autopush.maa_core import (
     MaaCoreLibrary,
     MaaEvent,
     MaaCoreSession,
+    build_copilot_task,
     extract_oper_box_details,
     summarize_events,
 )
@@ -93,6 +94,45 @@ def test_task_completion_still_requires_result_verification():
     assert summary["copilot_action_count"] == 1
     assert summary["verification_required"]
     assert not summary["verified"]
+
+
+def test_copilot_task_can_enable_auto_formation_without_sanity_potion(
+    tmp_path: Path,
+):
+    copilot = tmp_path / "job.json"
+    operbox = tmp_path / "operbox.json"
+
+    task = build_copilot_task(
+        copilot_file=copilot,
+        formation=True,
+        formation_index=2,
+        ignore_requirements=True,
+        operbox_data_path=operbox,
+    )
+
+    assert task["filename"] == str(copilot.resolve())
+    assert task["formation"] is True
+    assert task["formation_index"] == 2
+    assert task["ignore_requirements"] is True
+    assert task["operbox_data_path"] == str(operbox.resolve())
+    assert task["use_sanity_potion"] is False
+    assert task["exercise"] is False
+
+
+def test_copilot_task_can_wait_for_settlement_through_single_multi_entry(
+    tmp_path: Path,
+):
+    copilot = tmp_path / "job.json"
+
+    task = build_copilot_task(
+        copilot_file=copilot,
+        wait_until_end=True,
+    )
+
+    assert "filename" not in task
+    assert task["copilot_list"] == [
+        {"id": 0, "filename": str(copilot.resolve())}
+    ]
 
 
 def test_task_stopped_is_terminal_and_never_success():

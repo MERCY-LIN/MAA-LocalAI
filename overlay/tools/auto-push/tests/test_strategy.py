@@ -14,7 +14,13 @@ def _strategy(*names: str) -> CopilotStrategy:
         stage_id="act55side_08",
         title="test",
         direct_operators=[
-            OperatorRequirement(name=name, elite=2, level=60, skill_level=10)
+            OperatorRequirement(
+                name=name,
+                elite=2,
+                level=60,
+                skill_level=10,
+                requirements_declared=True,
+            )
             for name in names
         ],
         action_count=5,

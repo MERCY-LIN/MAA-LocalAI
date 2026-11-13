@@ -1,5 +1,6 @@
 import json
 import sys
+import types
 from pathlib import Path
 
 import cv2
@@ -7,7 +8,16 @@ import numpy as np
 
 import autopush.debug_cli as debug_cli
 from autopush.adb import AdbError
-from autopush.debug_cli import _default_adb, main
+from autopush.debug_cli import (
+    _default_adb,
+    _capture_verified_result,
+    _is_safe_preflight_state,
+    _snapshot_image,
+    main,
+)
+from autopush.evidence import EvidenceError
+from autopush.metrics import RoundMetrics
+from autopush.verifier import ResultVerification
 from autopush.evidence import RunStore
 from autopush.states import RunPhase
 
@@ -84,6 +94,106 @@ def test_default_adb_discovery_has_no_undefined_candidate(monkeypatch):
     result = _default_adb()
 
     assert result is None or result.is_file()
+
+
+def test_preflight_accepts_only_exact_target_stage_detail():
+    assert _is_safe_preflight_state("stage_detail_act55side_ex05", "act55side_ex05")
+    assert _is_safe_preflight_state("home", "act55side_ex05")
+    assert not _is_safe_preflight_state(
+        "stage_detail_act55side_ex04",
+        "act55side_ex05",
+    )
+    assert not _is_safe_preflight_state("unknown", "act55side_ex05")
+
+
+def test_snapshot_image_reads_nested_preflight_metadata():
+    assert _snapshot_image(
+        {"screenshot": {"path": "preflight.png", "sequence": 1}}
+    )["path"] == "preflight.png"
+
+
+def test_snapshot_image_rejects_wrong_payload_shape():
+    try:
+        _snapshot_image({"path": "preflight.png"})
+    except EvidenceError as exception:
+        assert "no captured screenshot" in str(exception)
+    else:
+        raise AssertionError("invalid snapshot payload was accepted")
+
+
+def test_result_capture_polls_unknown_frames_without_touching_game(
+    tmp_path: Path,
+    monkeypatch,
+):
+    success, payload = cv2.imencode(".png", _three_star_image())
+    assert success
+
+    class FakeAdb:
+        def __init__(self, **_kwargs):
+            self.sequence = 0
+
+        def capture_frame(self, *, force):
+            assert force
+            self.sequence += 1
+            return types.SimpleNamespace(
+                payload=payload.tobytes(),
+                metadata=lambda: {
+                    "sequence": self.sequence,
+                    "action_sequence": 0,
+                    "captured_at": "now",
+                    "cache_hit": False,
+                },
+            )
+
+    class FakeVerifier:
+        def __init__(self):
+            self.calls = 0
+
+        def verify(self, _image, **_kwargs):
+            self.calls += 1
+            status = (
+                "unknown"
+                if self.calls < 3
+                else "non_three_star"
+            )
+            return ResultVerification(
+                status=status,
+                stars=None,
+                confidence=1.0,
+                evidence=(),
+                needs_computer_use=status == "unknown",
+            )
+
+    instances = []
+
+    def make_adb(**kwargs):
+        instance = FakeAdb(**kwargs)
+        instances.append(instance)
+        return instance
+
+    monkeypatch.setattr(debug_cli, "AdbClient", make_adb)
+    sleeps = []
+    monkeypatch.setattr(
+        debug_cli.time,
+        "sleep",
+        lambda seconds: sleeps.append(seconds),
+    )
+
+    verification, screenshots = _capture_verified_result(
+        adb_path=tmp_path / "adb.exe",
+        address="emulator-5554",
+        destination=tmp_path / "result.png",
+        metrics=RoundMetrics(round_name="result", stage="test"),
+        verifier=FakeVerifier(),
+        maximum_captures=4,
+        interval_seconds=2.0,
+    )
+
+    assert verification.status == "non_three_star"
+    assert len(screenshots) == 3
+    assert sleeps == [2.0, 2.0]
+    assert (tmp_path / "result-wait-1.png").is_file()
+    assert (tmp_path / "result-wait-2.png").is_file()
 
 
 def test_stop_records_unverified_safe_exit_without_adb(

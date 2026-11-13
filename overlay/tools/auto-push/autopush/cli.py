@@ -15,6 +15,7 @@ from .maa_core import (
     MaaCoreError,
     extract_oper_box_details,
     run_copilot_file,
+    run_custom_tasks,
     run_oper_box,
     summarize_events,
 )
@@ -84,6 +85,7 @@ def _analyze(arguments: argparse.Namespace) -> int:
         metrics=metrics,
         model_client=model_client,
         allow_support=not arguments.no_support,
+        excluded_strategy_ids=arguments.exclude or (),
     )
     metrics.add_test(
         TestResult(
@@ -357,6 +359,43 @@ def _recognize_roster(arguments: argparse.Namespace) -> int:
     return exit_code
 
 
+def _run_custom(arguments: argparse.Namespace) -> int:
+    metrics = RoundMetrics(
+        round_name=arguments.round_name,
+        stage="custom-task",
+        limits=_limits(arguments),
+    )
+    exit_code = 2
+    try:
+        events = run_custom_tasks(
+            dll_path=arguments.dll,
+            resource_dir=arguments.resource_dir,
+            user_dir=arguments.user_dir,
+            adb_path=arguments.adb,
+            address=arguments.address,
+            connect_config=arguments.connect_config,
+            task_names=arguments.task_names,
+            metrics=metrics,
+            timeout_seconds=arguments.timeout,
+        )
+        summary = summarize_events(events)
+        exit_code = 0 if summary["task_completed"] else 2
+        print(json.dumps(summary, ensure_ascii=False, indent=2))
+    except (MaaCoreError, OSError, TimeoutError, ValueError) as exception:
+        metrics.add_test(
+            TestResult(
+                name="custom-runtime",
+                success=False,
+                detail=str(exception),
+            )
+        )
+    finally:
+        metrics.finish()
+        report_path = metrics.write(arguments.report)
+    print(f"Metrics report: {report_path}")
+    return exit_code
+
+
 def _fetch_jobs(arguments: argparse.Namespace) -> int:
     metrics = RoundMetrics(
         round_name=arguments.round_name,
@@ -524,6 +563,11 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--strategies", nargs="+", required=True)
     analyze.add_argument("--substitutions")
     analyze.add_argument("--no-support", action="store_true")
+    analyze.add_argument(
+        "--exclude",
+        nargs="+",
+        help="Copilot job paths that must not be selected again",
+    )
     analyze.add_argument("--model", help="optional local model ID")
     analyze.add_argument("--endpoint", default="http://127.0.0.1:11434/v1")
     analyze.add_argument("--model-timeout", type=int, default=90)
@@ -601,6 +645,23 @@ def build_parser() -> argparse.ArgumentParser:
     recognize_roster.add_argument("--report", required=True)
     recognize_roster.add_argument("--round-name", default="auto-push-roster")
     recognize_roster.set_defaults(handler=_recognize_roster)
+
+    run_custom = subparsers.add_parser(
+        "run-custom",
+        parents=[_budget_parser()],
+        help="execute one or more MAA Custom task names",
+    )
+    run_custom.add_argument("--dll", required=True)
+    run_custom.add_argument("--resource-dir", required=True)
+    run_custom.add_argument("--user-dir", required=True)
+    run_custom.add_argument("--adb", required=True)
+    run_custom.add_argument("--address", default="emulator-5554")
+    run_custom.add_argument("--connect-config", default="General")
+    run_custom.add_argument("--task-names", nargs="+", required=True)
+    run_custom.add_argument("--timeout", type=int, default=600)
+    run_custom.add_argument("--report", required=True)
+    run_custom.add_argument("--round-name", default="auto-push-custom")
+    run_custom.set_defaults(handler=_run_custom)
 
     fetch_jobs = subparsers.add_parser(
         "fetch-jobs",

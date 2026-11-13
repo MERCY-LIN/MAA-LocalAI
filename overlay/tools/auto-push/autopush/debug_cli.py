@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import subprocess
+import time
 import urllib.parse
 import urllib.request
 from dataclasses import asdict
@@ -71,6 +72,16 @@ SAFE_PREFLIGHT_STATES = {
     "settings",
     "terminal_protocol",
 }
+TARGET_STAGE_DETAIL_PREFIX = "stage_detail_"
+
+
+def _is_safe_preflight_state(state_name: str, stage: str) -> bool:
+    """Accept generic safe pages or the exact target's stage-detail page."""
+
+    return (
+        state_name in SAFE_PREFLIGHT_STATES
+        or state_name == f"{TARGET_STAGE_DETAIL_PREFIX}{stage}"
+    )
 
 
 def _resolve(value: str | None, default: Path) -> Path:
@@ -401,13 +412,15 @@ def _capture_screenshot(
     address: str,
     destination: Path,
     metrics: RoundMetrics,
+    client: AdbClient | None = None,
 ) -> dict[str, Any]:
-    frame = AdbClient(
+    capture_client = client or AdbClient(
         adb_path=adb_path,
         serial=address,
         metrics=metrics,
         minimum_capture_interval_seconds=0,
-    ).capture_frame(force=True)
+    )
+    frame = capture_client.capture_frame(force=True)
     image = decode_png(frame.payload)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(frame.payload)
@@ -418,6 +431,54 @@ def _capture_screenshot(
         "sha256": hashlib.sha256(frame.payload).hexdigest(),
         **frame.metadata(),
     }
+
+
+def _capture_verified_result(
+    *,
+    adb_path: Path,
+    address: str,
+    destination: Path,
+    metrics: RoundMetrics,
+    verifier: BattleResultVerifier,
+    maximum_captures: int = 10,
+    interval_seconds: float = 6.0,
+) -> tuple[Any, list[dict[str, Any]]]:
+    """Poll for a real settlement screen without touching the battle UI."""
+
+    client = AdbClient(
+        adb_path=adb_path,
+        serial=address,
+        metrics=metrics,
+        minimum_capture_interval_seconds=0,
+    )
+    screenshots: list[dict[str, Any]] = []
+    verification = None
+    for attempt in range(maximum_captures):
+        if attempt:
+            time.sleep(interval_seconds)
+        capture_path = (
+            destination
+            if attempt == 0
+            else destination.with_name(
+                f"{destination.stem}-wait-{attempt}{destination.suffix}"
+            )
+        )
+        screenshots.append(
+            _capture_screenshot(
+                adb_path=adb_path,
+                address=address,
+                destination=capture_path,
+                metrics=metrics,
+                client=client,
+            )
+        )
+        decoded = cv2.imread(str(capture_path), cv2.IMREAD_COLOR)
+        if decoded is None:
+            raise ValueError("unable to decode result screenshot")
+        verification = verifier.verify(decoded, metrics=metrics)
+        if verification.status != "unknown":
+            break
+    return verification, screenshots
 
 
 def _formation_from_copilot(path: Path | None) -> dict[str, Any]:
@@ -505,6 +566,15 @@ def _snapshot_payload(
         str(snapshot_path.resolve()),
     ]
     return payload, artifacts
+
+
+def _snapshot_image(payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the captured image metadata from a snapshot payload."""
+
+    image = payload.get("screenshot")
+    if not isinstance(image, dict) or not isinstance(image.get("path"), str):
+        raise EvidenceError("snapshot payload has no captured screenshot")
+    return image
 
 
 def _open_snapshot_store(
@@ -684,7 +754,7 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
         round_name="localai-debug-run-stage",
         stage=arguments.stage,
         limits=BudgetLimits(
-            screenshots=3,
+            screenshots=16,
             tool_calls=240,
             strategy_runs=1,
         ),
@@ -705,6 +775,9 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 "user_dir": str(user_dir),
                 "copilot": str(copilot_path),
                 "state_memory_dir": str(state_memory_dir),
+            "formation_enabled": arguments.formation,
+            "ignore_requirements": arguments.ignore_requirements,
+            "operbox_data_path": arguments.operbox_data,
                 "formation": _formation_from_copilot(copilot_path),
                 "versions": {
                     "maa_core": _maa_version(dll_path),
@@ -761,10 +834,11 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
         )
         artifacts.extend(screenshot_artifacts)
         store.append_event("preflight_completed", {"screenshot": screenshot})
+        preflight_image_payload = _snapshot_image(screenshot)
         try:
             memory = VisualStateMemory.load(state_memory_dir, metrics=metrics)
             preflight_image = cv2.imread(
-                screenshot["path"],
+                preflight_image_payload["path"],
                 cv2.IMREAD_COLOR,
             )
             if preflight_image is None:
@@ -815,7 +889,10 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
         store.append_event("preflight_state_recognized", preflight_payload)
         if (
             not preflight_state.known
-            or preflight_state.name not in SAFE_PREFLIGHT_STATES
+            or not _is_safe_preflight_state(
+                preflight_state.name,
+                arguments.stage,
+            )
         ):
             store.update_status(
                 RunPhase.UNKNOWN,
@@ -832,7 +909,7 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
                     attempt_id=store.attempt_id,
                     data={
                         "stage": arguments.stage,
-                        "preflight_screenshot": screenshot,
+                        "preflight_screenshot": preflight_image_payload,
                         "preflight_state": preflight_payload,
                         "reason": (
                             "formal battle was not started because the current "
@@ -859,6 +936,13 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
             metrics=metrics,
             timeout_seconds=arguments.timeout,
             exercise=False,
+            formation=arguments.formation,
+            formation_index=arguments.formation_index,
+            add_trust=arguments.add_trust,
+            ignore_requirements=arguments.ignore_requirements,
+            operbox_data_path=arguments.operbox_data,
+            support_unit_usage=arguments.support_unit_usage,
+            wait_until_end=True,
             event_sink=lambda event: _write_maa_event(store, event),
             stop_requested=store.stop_requested,
         )
@@ -877,20 +961,21 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
         if can_verify:
             store.update_status(RunPhase.VERIFYING, task=summary)
             try:
-                result_image = _capture_screenshot(
+                verifier = BattleResultVerifier(
+                    template_root,
+                    threshold=arguments.verify_threshold,
+                )
+                verification, result_screenshots = _capture_verified_result(
                     adb_path=adb_path,
                     address=arguments.address,
                     destination=result_path,
                     metrics=metrics,
+                    verifier=verifier,
                 )
-                artifacts.append(str(result_path.resolve()))
-                decoded = cv2.imread(str(result_path), cv2.IMREAD_COLOR)
-                if decoded is None:
-                    raise ValueError("unable to decode result screenshot")
-                verification = BattleResultVerifier(
-                    template_root,
-                    threshold=arguments.verify_threshold,
-                ).verify(decoded, metrics=metrics)
+                result_image = result_screenshots[-1]
+                artifacts.extend(
+                    item["path"] for item in result_screenshots
+                )
                 artifacts.append(
                     str(store.run_dir / "artifacts" / "result-verification.json")
                 )
@@ -983,16 +1068,7 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
             ),
             exit_code,
         )
-    except (
-        AdbError,
-        BudgetExceeded,
-        DeviceBusyError,
-        EvidenceError,
-        MaaCoreError,
-        OSError,
-        TimeoutError,
-        ValueError,
-    ) as exception:
+    except Exception as exception:
         metrics.add_test(
             TestResult(
                 name="formal-run-runtime",
@@ -1098,6 +1174,13 @@ def _stop(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
         raise EvidenceError(
             f"run is not active: {status.get('status', 'UNKNOWN')}"
         )
+    # Persist the cooperative stop before taking a diagnostic screenshot. The
+    # active runner owns the device mutex, so screenshot acquisition may fail
+    # and must not prevent the stop request from reaching it.
+    request = store.request_stop(
+        reason=arguments.reason,
+        requested_by=arguments.requested_by,
+    )
     adb_path = _resolve(arguments.adb, Path(arguments.adb)) if arguments.adb else (
         _default_adb()
     )
@@ -1124,16 +1207,12 @@ def _stop(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 label="before-stop",
                 metrics=metrics,
             )
-        except (AdbError, OSError, ValueError) as exception:
+        except (AdbError, DeviceBusyError, OSError, ValueError) as exception:
             snapshot_error = str(exception)
             artifacts = []
     else:
         artifacts = []
         snapshot_error = "ADB executable was not found"
-    request = store.request_stop(
-        reason=arguments.reason,
-        requested_by=arguments.requested_by,
-    )
     active = read_json(store.active_run_path) or {}
     active_pid = active.get("pid")
     runner_alive = isinstance(active_pid, int) and process_is_running(active_pid)
@@ -1303,6 +1382,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_stage.add_argument("--template-root")
     run_stage.add_argument("--state-memory-dir")
     run_stage.add_argument("--verify-threshold", type=float, default=0.86)
+    run_stage.add_argument("--formation", action="store_true")
+    run_stage.add_argument("--formation-index", type=int, default=0)
+    run_stage.add_argument("--add-trust", action="store_true")
+    run_stage.add_argument("--ignore-requirements", action="store_true")
+    run_stage.add_argument("--operbox-data")
+    run_stage.add_argument("--support-unit-usage", type=int, default=0)
     run_stage.add_argument("--confirm-formal-battle", action="store_true")
     run_stage.set_defaults(handler=_run_stage)
 

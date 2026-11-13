@@ -10,8 +10,13 @@ from typing import Any, Iterable
 
 from .map_planner import StageMap
 from .metrics import RoundMetrics, TestResult
-from .model_client import LocalModelClient
-from .strategy import CandidateEvaluation, RosterOperator, rank_strategies
+from .model_client import LocalModelClient, ModelError
+from .strategy import (
+    CandidateEvaluation,
+    RosterOperator,
+    rank_strategies,
+    strategy_fingerprint,
+)
 
 
 def load_roster(path: str | Path, metrics: RoundMetrics | None = None) -> dict[str, RosterOperator]:
@@ -90,13 +95,15 @@ def load_substitutions(
 
 
 def _extract_json_object(text: str) -> dict[str, Any]:
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if match is None:
-        raise ValueError("model reply contains no JSON object")
-    payload = json.loads(match.group(0))
-    if not isinstance(payload, dict):
-        raise ValueError("model reply JSON is not an object")
-    return payload
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"\{", text):
+        try:
+            payload, _ = decoder.raw_decode(text[match.start():])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    raise ValueError("model reply contains no JSON object")
 
 
 def _compact_candidates(candidates: list[CandidateEvaluation]) -> str:
@@ -156,6 +163,7 @@ def build_round_plan(
     metrics: RoundMetrics,
     model_client: LocalModelClient | None = None,
     allow_support: bool = True,
+    excluded_strategy_ids: Iterable[str | Path] = (),
 ) -> dict[str, Any]:
     """Create an auditable plan without touching the emulator."""
 
@@ -167,6 +175,34 @@ def build_round_plan(
         allow_support=allow_support,
         metrics=metrics,
     )
+    excluded_raw = {
+        str(strategy_id).strip()
+        for strategy_id in excluded_strategy_ids
+        if str(strategy_id).strip()
+    }
+    excluded = {
+        str(Path(strategy_id).expanduser().resolve())
+        for strategy_id in excluded_raw
+    }
+    if excluded:
+        excluded_fingerprints = {
+            strategy_fingerprint(item.strategy.raw)
+            for item in candidates
+            if item.strategy.strategy_id in excluded_raw
+            or str(Path(item.strategy.strategy_id).resolve()) in excluded
+            if isinstance(getattr(item.strategy, "raw", None), dict)
+        }
+        candidates = [
+            item
+            for item in candidates
+            if item.strategy.strategy_id not in excluded_raw
+            and str(Path(item.strategy.strategy_id).resolve()) not in excluded
+            and (
+                not isinstance(getattr(item.strategy, "raw", None), dict)
+                or strategy_fingerprint(item.strategy.raw)
+                not in excluded_fingerprints
+            )
+        ]
     metrics.add_test(
         TestResult(
             name="map-analysis",
@@ -192,13 +228,21 @@ def build_round_plan(
     selected_index = 0 if any(item.runnable for item in candidates) else None
     selection_reason = "local ranking"
     if model_client is not None and selected_index is not None:
-        selected_index = choose_strategy_with_model(
-            model_client,
-            candidates,
-            stage_id=stage_id,
-            metrics=metrics,
-        )
-        selection_reason = "local model selected from validated candidates"
+        try:
+            selected_index = choose_strategy_with_model(
+                model_client,
+                candidates,
+                stage_id=stage_id,
+                metrics=metrics,
+            )
+        except (ModelError, ValueError, TypeError, KeyError) as exception:
+            selection_reason = (
+                "local ranking; model selection unavailable: "
+                f"{type(exception).__name__}: {exception}"
+            )
+            metrics.add_note(selection_reason)
+        else:
+            selection_reason = "local model selected from validated candidates"
 
     selected = candidates[selected_index] if selected_index is not None else None
     plan = {
@@ -206,6 +250,7 @@ def build_round_plan(
         "stage_code": stage_map.stage_code,
         "stage_name": stage_map.name,
         "strategy_selection": selection_reason,
+        "excluded_strategies": sorted(excluded),
         "selected_strategy": (
             {
                 "path": selected.strategy.strategy_id,
@@ -245,11 +290,11 @@ def build_round_plan(
             "mode": "dry-run",
             "reason": "This milestone produces and validates the opening plan only.",
             "trial_policy": {
-                "use_drill_first": True,
+                "use_drill_first": False,
                 "max_attempts": 6,
                 "max_unknown_verifications": 2,
                 "max_computer_use_operations": metrics.limits.computer_use_operations,
-                "require_three_star_before_real_run": True,
+                "require_three_star_before_real_run": False,
                 "require_three_star_after_real_run": True,
             },
         },

@@ -4,11 +4,30 @@ from __future__ import annotations
 
 import json
 import os
+import hashlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
 
 from .metrics import RoundMetrics
+
+
+def strategy_fingerprint(payload: dict[str, Any]) -> str:
+    """Return a stable identity for the executable tactical content."""
+
+    tactical = {
+        "stage_name": payload.get("stage_name"),
+        "opers": payload.get("opers", []),
+        "groups": payload.get("groups", []),
+        "actions": payload.get("actions", []),
+    }
+    canonical = json.dumps(
+        tactical,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -21,6 +40,7 @@ class OperatorRequirement:
     skill_level: int = 0
     module_level: int = -1
     skill: int | None = None
+    requirements_declared: bool = False
 
 
 @dataclass(frozen=True)
@@ -119,7 +139,8 @@ class CandidateEvaluation:
 
 
 def _parse_requirement(payload: dict[str, Any]) -> OperatorRequirement:
-    requirements = payload.get("requirements") or {}
+    raw_requirements = payload.get("requirements")
+    requirements = raw_requirements if isinstance(raw_requirements, dict) else {}
     return OperatorRequirement(
         name=str(payload.get("name", "")),
         elite=int(requirements.get("elite", 0) or 0),
@@ -127,54 +148,111 @@ def _parse_requirement(payload: dict[str, Any]) -> OperatorRequirement:
         skill_level=int(requirements.get("skill_level", 0) or 0),
         module_level=int(requirements.get("module", -1) or -1),
         skill=int(payload["skill"]) if payload.get("skill") is not None else None,
+        requirements_declared=bool(requirements),
     )
 
 
-def _requirement_gap(
+def _assess_requirement(
     requirement: OperatorRequirement,
     operator: RosterOperator,
-) -> list[str]:
+) -> tuple[list[str], list[str]]:
     gaps: list[str] = []
+    unverified: list[str] = []
     if operator.elite < requirement.elite:
         gaps.append(
             f"{requirement.name}: elite {operator.elite} < {requirement.elite}"
         )
     if operator.level < requirement.level:
         gaps.append(f"{requirement.name}: level {operator.level} < {requirement.level}")
-    effective_skill_level = operator.effective_skill_level(requirement.skill)
-    if effective_skill_level < requirement.skill_level:
-        gaps.append(
-            f"{requirement.name}: skill {effective_skill_level} < "
-            f"{requirement.skill_level}"
-        )
-    if (
-        requirement.module_level >= 0
-        and operator.module_level < requirement.module_level
-    ):
-        gaps.append(
-            f"{requirement.name}: module {operator.module_level} < "
-            f"{requirement.module_level}"
-        )
-    return gaps
+    if requirement.skill_level > 0:
+        if not operator.skill_levels and operator.skill_level <= 0:
+            unverified.append(
+                f"{requirement.name}: skill requirements unverified"
+            )
+        else:
+            effective_skill_level = operator.effective_skill_level(
+                requirement.skill
+            )
+            if effective_skill_level < requirement.skill_level:
+                gaps.append(
+                    f"{requirement.name}: skill {effective_skill_level} < "
+                    f"{requirement.skill_level}"
+                )
+    if requirement.module_level >= 0:
+        if operator.module_level < 0:
+            unverified.append(
+                f"{requirement.name}: module requirements unverified"
+            )
+        elif operator.module_level < requirement.module_level:
+            gaps.append(
+                f"{requirement.name}: module {operator.module_level} < "
+                f"{requirement.module_level}"
+            )
+    return gaps, unverified
 
 
 def _best_group_option(
     group: list[OperatorRequirement],
     roster: dict[str, RosterOperator],
-) -> tuple[OperatorRequirement | None, RosterOperator | None, list[str]]:
+) -> tuple[
+    OperatorRequirement | None,
+    RosterOperator | None,
+    list[str],
+    list[str],
+    bool,
+]:
     scored: list[
-        tuple[int, OperatorRequirement, RosterOperator, list[str]]
+        tuple[
+            int,
+            bool,
+            int,
+            OperatorRequirement,
+            RosterOperator,
+            list[str],
+            list[str],
+        ]
     ] = []
     for requirement in group:
         operator = roster.get(requirement.name)
         if operator is None:
             continue
-        gaps = _requirement_gap(requirement, operator)
-        scored.append((len(gaps), requirement, operator, gaps))
+        if requirement.requirements_declared:
+            gaps, unverified = _assess_requirement(requirement, operator)
+        else:
+            gaps = []
+            unverified = [
+                f"{requirement.name}: requirements missing"
+            ]
+        scored.append(
+            (
+                len(gaps),
+                not requirement.requirements_declared,
+                len(unverified),
+                requirement,
+                operator,
+                gaps,
+                unverified,
+            )
+        )
     if not scored:
-        return None, None, [f"none available: {', '.join(op.name for op in group)}"]
-    _, requirement, operator, gaps = min(scored, key=lambda item: item[0])
-    return requirement, operator, gaps
+        return (
+            None,
+            None,
+            [f"none available: {', '.join(op.name for op in group)}"],
+            [],
+            False,
+        )
+    _, _, _, requirement, operator, gaps, unverified = min(
+        scored,
+        key=lambda item: (item[0], item[1], item[2]),
+    )
+    return (
+        requirement,
+        operator,
+        gaps,
+        unverified,
+        requirement.requirements_declared,
+    )
 
 
 def evaluate_strategy(
@@ -191,6 +269,9 @@ def evaluate_strategy(
     diagnostics: list[str] = []
     chosen_substitutions: list[tuple[str, str]] = []
     degraded = 0
+    unverified = 0
+    missing_requirements = 0
+    unknown_fields = 0
 
     for requirement in strategy.direct_operators:
         operator = roster.get(requirement.name)
@@ -208,19 +289,41 @@ def evaluate_strategy(
             else:
                 chosen_substitutions.append((requirement.name, replacement))
         else:
-            gaps = _requirement_gap(requirement, operator)
-            if gaps:
-                degraded += len(gaps)
-                diagnostics.extend(gaps)
+            if not requirement.requirements_declared:
+                unverified += 1
+                missing_requirements += 1
+                diagnostics.append(
+                    f"{requirement.name}: requirements missing"
+                )
+            else:
+                gaps, unknown = _assess_requirement(requirement, operator)
+                if gaps:
+                    degraded += len(gaps)
+                    diagnostics.extend(gaps)
+                if unknown:
+                    unverified += 1
+                    unknown_fields += len(unknown)
+                    diagnostics.extend(unknown)
 
     for group in strategy.operator_groups:
-        _, _, gaps = _best_group_option(group, roster)
+        requirement, _, gaps, unknown, declared = _best_group_option(
+            group,
+            roster,
+        )
         if gaps:
             diagnostics.extend(gaps)
             if gaps[0].startswith("none available"):
                 missing.append("/".join(operator.name for operator in group))
             else:
                 degraded += len(gaps)
+        if unknown:
+            diagnostics.extend(unknown)
+            if not declared and requirement is not None:
+                unverified += 1
+                missing_requirements += 1
+            else:
+                unverified += 1
+                unknown_fields += len(unknown)
 
     if len(missing) > 1:
         status = "unavailable"
@@ -230,17 +333,26 @@ def evaluate_strategy(
         status = "support" if allow_support else "unavailable"
     elif degraded:
         status = "degraded"
+    elif unverified:
+        status = "unverified"
     else:
         status = "ready"
 
     status_bonus = {
         "ready": 100.0,
+        "unverified": 90.0,
         "degraded": 75.0,
         "substitution": 60.0,
         "support": 35.0,
         "unavailable": 0.0,
     }[status]
-    score = status_bonus - degraded * 3.0 - len(missing) * 25.0
+    score = (
+        status_bonus
+        - degraded * 3.0
+        - len(missing) * 25.0
+        - missing_requirements * 5.0
+        - unknown_fields * 0.5
+    )
     score += min(10.0, max(0.0, 20.0 - strategy.action_count) * 0.25)
     return CandidateEvaluation(
         strategy=strategy,

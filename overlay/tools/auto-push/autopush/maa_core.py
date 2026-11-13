@@ -484,22 +484,30 @@ def run_copilot_file(
     metrics: RoundMetrics,
     timeout_seconds: int = 600,
     exercise: bool = False,
+    formation: bool = False,
+    formation_index: int = 0,
+    add_trust: bool = False,
+    ignore_requirements: bool = True,
+    operbox_data_path: str | Path | None = None,
+    support_unit_usage: int = 0,
+    wait_until_end: bool = False,
     event_sink: Callable[[MaaEvent], None] | None = None,
     stop_requested: Callable[[], bool] | None = None,
 ) -> list[MaaEvent]:
     """Execute one local Copilot JSON and return all MAA callbacks."""
 
     metrics.consume("strategy_runs")
-    task = {
-        "filename": str(Path(copilot_file).resolve()),
-        "formation": False,
-        "exercise": exercise,
-        "support_unit_usage": 0,
-        "add_trust": False,
-        "ignore_requirements": True,
-        "use_sanity_potion": False,
-        "loop_times": 1,
-    }
+    task = build_copilot_task(
+        copilot_file=copilot_file,
+        exercise=exercise,
+        formation=formation,
+        formation_index=formation_index,
+        add_trust=add_trust,
+        ignore_requirements=ignore_requirements,
+        operbox_data_path=operbox_data_path,
+        support_unit_usage=support_unit_usage,
+        wait_until_end=wait_until_end,
+    )
     previous_priority = lower_current_process_priority()
     try:
         with DeviceControlLease(address):
@@ -523,6 +531,45 @@ def run_copilot_file(
                 )
     finally:
         restore_current_process_priority(previous_priority)
+
+
+def build_copilot_task(
+    *,
+    copilot_file: str | Path,
+    exercise: bool = False,
+    formation: bool = False,
+    formation_index: int = 0,
+    add_trust: bool = False,
+    ignore_requirements: bool = True,
+    operbox_data_path: str | Path | None = None,
+    support_unit_usage: int = 0,
+    wait_until_end: bool = False,
+) -> dict[str, Any]:
+    """Build one Copilot task without starting MaaCore."""
+
+    task: dict[str, Any] = {
+        "formation": formation,
+        "formation_index": formation_index,
+        "exercise": exercise,
+        "support_unit_usage": support_unit_usage,
+        "add_trust": add_trust,
+        "ignore_requirements": ignore_requirements,
+        "use_sanity_potion": False,
+        "loop_times": 1,
+    }
+    canonical_path = str(Path(copilot_file).resolve())
+    if wait_until_end:
+        task["copilot_list"] = [
+            {
+                "id": 0,
+                "filename": canonical_path,
+            }
+        ]
+    else:
+        task["filename"] = canonical_path
+    if operbox_data_path is not None:
+        task["operbox_data_path"] = str(Path(operbox_data_path).resolve())
+    return task
 
 
 def run_oper_box(
@@ -553,6 +600,45 @@ def run_oper_box(
                     config=connect_config,
                 )
                 session.append_task("OperBox", {})
+                session.start()
+                return session.wait(timeout_seconds=timeout_seconds)
+    finally:
+        restore_current_process_priority(previous_priority)
+
+
+def run_custom_tasks(
+    *,
+    dll_path: str | Path,
+    resource_dir: str | Path,
+    user_dir: str | Path,
+    adb_path: str | Path,
+    address: str,
+    connect_config: str,
+    task_names: list[str],
+    metrics: RoundMetrics,
+    timeout_seconds: int = 600,
+) -> list[MaaEvent]:
+    """Run one or more MAA custom task names through the Custom interface."""
+
+    metrics.consume("strategy_runs")
+    previous_priority = lower_current_process_priority()
+    try:
+        with DeviceControlLease(address):
+            with MaaCoreSession(
+                dll_path=dll_path,
+                resource_dir=resource_dir,
+                user_dir=user_dir,
+                metrics=metrics,
+            ) as session:
+                session.connect(
+                    adb_path=adb_path,
+                    address=address,
+                    config=connect_config,
+                )
+                session.append_task(
+                    "Custom",
+                    {"task_names": list(task_names)},
+                )
                 session.start()
                 return session.wait(timeout_seconds=timeout_seconds)
     finally:
