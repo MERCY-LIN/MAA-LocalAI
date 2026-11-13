@@ -174,6 +174,39 @@ def test_disconnect_is_terminal_and_never_success():
     assert not summary["task_completed"]
 
 
+def test_maa_stage_drops_three_star_is_recorded_as_core_evidence():
+    summary = summarize_events(
+        [
+            MaaEvent(
+                CoreMessage.TASK_CHAIN_START,
+                {"taskchain": "Copilot", "taskid": 44},
+            ),
+            MaaEvent(
+                CoreMessage.SUB_TASK_START,
+                {
+                    "taskchain": "Copilot",
+                    "taskid": 44,
+                    "details": {
+                        "task": "StageDrops-Stars-3",
+                        "result": {
+                            "score": 0.9985,
+                            "rect": [71, 292, 205, 58],
+                            "template": "StageDrops-Stars-3.png",
+                        },
+                    },
+                },
+            ),
+            MaaEvent(
+                CoreMessage.TASK_CHAIN_COMPLETED,
+                {"taskchain": "Copilot", "taskid": 44},
+            ),
+        ]
+    )
+
+    assert summary["maa_three_star"] is True
+    assert summary["maa_three_star_evidence"][0]["score"] == 0.9985
+
+
 def test_summary_can_select_one_task_id():
     summary = summarize_events(
         [

@@ -992,6 +992,10 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
             store.update_status(RunPhase.UNKNOWN, task=summary)
 
         verification_status = verification.status if verification else "unknown"
+        core_star_evidence = summary.get("maa_three_star_evidence") or []
+        core_three_star = bool(summary.get("maa_three_star"))
+        if verification is None and core_three_star:
+            verification_status = "three_star"
         outcome = classify_outcome(
             stop_requested=stop_requested,
             task_completed=bool(summary["task_completed"]),
@@ -1001,7 +1005,26 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
             verification_status=verification_status,
         )
         verification_payload = (
-            asdict(verification) if verification is not None else None
+            asdict(verification)
+            if verification is not None
+            else (
+                {
+                    "status": "three_star",
+                    "stars": 3,
+                    "confidence": max(
+                        (
+                            float(item.get("score") or 0.0)
+                            for item in core_star_evidence
+                        ),
+                        default=0.0,
+                    ),
+                    "evidence": core_star_evidence,
+                    "needs_computer_use": False,
+                    "source": "maa_core_stage_drops_stars_3",
+                }
+                if core_three_star
+                else None
+            )
         )
         if verification_payload is not None:
             write_json_atomic(
@@ -1019,7 +1042,11 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 success=outcome is RunPhase.SUCCEEDED,
                 detail=outcome.value,
                 strategy_path=str(copilot_path),
-                stars=verification.stars if verification else None,
+                stars=(
+                    verification.stars
+                    if verification is not None
+                    else (3 if core_three_star else None)
+                ),
             )
         )
         metrics.finish()

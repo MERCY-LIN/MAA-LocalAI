@@ -178,6 +178,24 @@ def summarize_events(
         for event in relevant
         if event.details.get("what") == "CopilotAction"
     ]
+    star_matches: list[dict[str, Any]] = []
+    for event in relevant:
+        task_details = event.details.get("details")
+        if not isinstance(task_details, dict):
+            continue
+        if task_details.get("task") != "StageDrops-Stars-3":
+            continue
+        result = task_details.get("result")
+        if isinstance(result, dict):
+            star_matches.append(
+                {
+                    "task": "StageDrops-Stars-3",
+                    "score": result.get("score"),
+                    "rect": result.get("rect"),
+                    "template": result.get("template"),
+                    "message_name": _message_name(event),
+                }
+            )
     task_chain = next(
         (
             event.task_chain
@@ -218,6 +236,8 @@ def summarize_events(
         "event_count": len(events),
         "verification_required": True,
         "verified": False,
+        "maa_three_star": bool(star_matches),
+        "maa_three_star_evidence": star_matches,
     }
 
 
