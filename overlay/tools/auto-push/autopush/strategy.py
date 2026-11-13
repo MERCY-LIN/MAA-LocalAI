@@ -30,6 +30,28 @@ def strategy_fingerprint(payload: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def job_requires_wartime_press(payload: dict[str, Any]) -> bool:
+    """Return whether a job document states the newspaper prerequisite."""
+
+    doc = payload.get("doc") or {}
+    details = str(doc.get("details", "")) if isinstance(doc, dict) else ""
+    return "报纸小游戏" in details or "自爆榴弹\"初始费用降为10费" in details
+
+
+def job_is_raid_only(payload: dict[str, Any]) -> bool:
+    """Return whether a job document explicitly targets the raid mode."""
+
+    doc = payload.get("doc") or {}
+    title = str(doc.get("title", "")) if isinstance(doc, dict) else ""
+    return "仅突袭" in title
+
+
+def candidate_has_hard_elite_gap(candidate: CandidateEvaluation) -> bool:
+    """Return whether any named operator cannot satisfy the elite floor."""
+
+    return any(": elite " in item for item in candidate.diagnostics)
+
+
 @dataclass(frozen=True)
 class OperatorRequirement:
     """Minimum account state required by a Copilot operator entry."""

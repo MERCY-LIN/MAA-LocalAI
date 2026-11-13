@@ -46,7 +46,12 @@ from .planner import load_roster
 from .recognizer import decode_png
 from .state_memory import VisualStateMemory
 from .states import RunPhase
-from .strategy import collect_strategy_files, rank_strategies
+from .strategy import (
+    candidate_has_hard_elite_gap,
+    collect_strategy_files,
+    job_is_raid_only,
+    rank_strategies,
+)
 from .verifier import BattleResultVerifier
 
 
@@ -1415,7 +1420,11 @@ def _run_campaign(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
             for candidate in candidates
             if candidate.runnable
             and not candidate.missing
-            and not any(": elite " in item for item in candidate.diagnostics)
+            and not candidate_has_hard_elite_gap(candidate)
+            and (
+                not isinstance(getattr(candidate.strategy, "raw", None), dict)
+                or not job_is_raid_only(candidate.strategy.raw)
+            )
         ]
         if not eligible:
             stage_results.append(

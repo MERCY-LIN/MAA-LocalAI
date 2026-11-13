@@ -1,10 +1,14 @@
 from pathlib import Path
 
 from autopush.strategy import (
+    CandidateEvaluation,
     CopilotStrategy,
     OperatorRequirement,
     RosterOperator,
+    candidate_has_hard_elite_gap,
     evaluate_strategy,
+    job_is_raid_only,
+    job_requires_wartime_press,
 )
 
 
@@ -65,3 +69,33 @@ def test_two_missing_operators_are_unavailable():
     result = evaluate_strategy(_strategy("A", "B"), {})
     assert result.status == "unavailable"
     assert not result.runnable
+
+
+def test_job_prerequisites_and_mode_are_detected():
+    payload = {
+        "doc": {
+            "title": "TL-EX-5 仅突袭",
+            "details": "需要先做完报纸小游戏使自爆榴弹初始费用降为10费",
+        }
+    }
+
+    assert job_requires_wartime_press(payload)
+    assert job_is_raid_only(payload)
+
+
+def test_hard_elite_gap_is_detected_from_diagnostics():
+    candidate = CandidateEvaluation(
+        strategy=CopilotStrategy(
+            path=Path("job.json"),
+            stage_id="act55side_ex05",
+            title="test",
+        ),
+        status="degraded",
+        score=0,
+        missing=(),
+        substitutions=(),
+        support_needed=False,
+        diagnostics=("A: elite 1 < 2",),
+    )
+
+    assert candidate_has_hard_elite_gap(candidate)
