@@ -131,8 +131,26 @@ def test_copilot_task_can_wait_for_settlement_through_single_multi_entry(
 
     assert "filename" not in task
     assert task["copilot_list"] == [
-        {"id": 0, "filename": str(copilot.resolve())}
+        {
+            "id": 0,
+            "filename": str(copilot.resolve()),
+            "is_raid": False,
+        }
     ]
+
+
+def test_copilot_task_marks_raid_mode_for_single_multi_entry(
+    tmp_path: Path,
+):
+    copilot = tmp_path / "job.json"
+
+    task = build_copilot_task(
+        copilot_file=copilot,
+        wait_until_end=True,
+        is_raid=True,
+    )
+
+    assert task["copilot_list"][0]["is_raid"] is True
 
 
 def test_task_stopped_is_terminal_and_never_success():

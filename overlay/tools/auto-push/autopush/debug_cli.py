@@ -951,6 +951,7 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
             operbox_data_path=arguments.operbox_data,
             support_unit_usage=arguments.support_unit_usage,
             wait_until_end=True,
+            is_raid=arguments.is_raid,
             event_sink=lambda event: _write_maa_event(store, event),
             stop_requested=store.stop_requested,
         )
@@ -1550,6 +1551,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_stage.add_argument("--ignore-requirements", action="store_true")
     run_stage.add_argument("--operbox-data")
     run_stage.add_argument("--support-unit-usage", type=int, default=0)
+    run_stage.add_argument("--is-raid", action="store_true")
     run_stage.add_argument("--confirm-formal-battle", action="store_true")
     run_stage.set_defaults(handler=_run_stage)
 

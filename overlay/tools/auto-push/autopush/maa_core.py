@@ -511,6 +511,7 @@ def run_copilot_file(
     operbox_data_path: str | Path | None = None,
     support_unit_usage: int = 0,
     wait_until_end: bool = False,
+    is_raid: bool = False,
     event_sink: Callable[[MaaEvent], None] | None = None,
     stop_requested: Callable[[], bool] | None = None,
 ) -> list[MaaEvent]:
@@ -527,6 +528,7 @@ def run_copilot_file(
         operbox_data_path=operbox_data_path,
         support_unit_usage=support_unit_usage,
         wait_until_end=wait_until_end,
+        is_raid=is_raid,
     )
     previous_priority = lower_current_process_priority()
     try:
@@ -564,6 +566,7 @@ def build_copilot_task(
     operbox_data_path: str | Path | None = None,
     support_unit_usage: int = 0,
     wait_until_end: bool = False,
+    is_raid: bool = False,
 ) -> dict[str, Any]:
     """Build one Copilot task without starting MaaCore."""
 
@@ -583,6 +586,7 @@ def build_copilot_task(
             {
                 "id": 0,
                 "filename": canonical_path,
+                "is_raid": is_raid,
             }
         ]
     else:
