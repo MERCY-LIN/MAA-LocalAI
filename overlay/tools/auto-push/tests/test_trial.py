@@ -105,3 +105,33 @@ def test_computer_use_fallback_is_budgeted():
     scheduler.record_verification(_result("unknown", None))
     assert scheduler.authorize_computer_use()
     assert not scheduler.authorize_computer_use()
+
+
+def test_unknown_result_pauses_before_another_formal_attempt():
+    scheduler = TrialScheduler(
+        [_candidate("a.json"), _candidate("b.json")],
+        RoundMetrics(round_name="trial-unknown", stage="test"),
+        TrialPolicy(max_attempts=3),
+    )
+    assert scheduler.next_attempt() is not None
+
+    scheduler.record_verification(_result("unknown", None))
+
+    assert scheduler.phase is RunPhase.PAUSED
+    assert scheduler.next_attempt() is None
+    assert "scene recovery" in (scheduler.terminal_reason or "")
+
+
+def test_paused_unknown_can_resume_only_with_recovery_evidence():
+    scheduler = TrialScheduler(
+        [_candidate("a.json"), _candidate("b.json")],
+        RoundMetrics(round_name="trial-recovery", stage="test"),
+    )
+    assert scheduler.next_attempt() is not None
+    scheduler.record_verification(_result("unknown", None))
+
+    scheduler.resume_after_recovery("snapshot-recovered-home")
+    second = scheduler.next_attempt()
+
+    assert second is not None
+    assert second.strategy_path.endswith("b.json")

@@ -40,6 +40,8 @@
 - `autopush/trial_executor.py`：串联准备页面、Copilot 执行、截图验证和有限 Computer Use 回退。
 - `autopush/cli.py`：离线规划与 ADB 检查入口。
 - `autopush/evidence.py`：运行 ID、原子状态、增量事件和停止请求。
+- `autopush/execution.py`：单关与连续推图共用的执行配置和开战前校验。
+- `autopush/recognition_acceptance.py`：外部真实截图与人工回调语料的验收集。
 - `autopush/debug_cli.py`：状态、快照、正式单关、停止和回放的 JSON 调试入口。
 - `autopush/states.py`：准备、执行、验证、成功、失败、停止、暂停、未知和预算耗尽。
 - `autopush/device_control.py`：与 WPF 共用的跨进程设备独占控制。
@@ -126,6 +128,11 @@ D:\work\maa-deps\python-autopush\Scripts\python.exe -m autopush.cli run-copilot 
 ```
 
 任务完成回调不能被当作三星通关。只有截图识别或 Computer Use 关键节点验证通过后，试跑才会记为成功；这条边界用于防止把 `TaskChainCompleted` 和实际三星结果混淆。
+
+结算截图由 MaaCore 三星回调触发，在回调返回前保存并识别，避免 Core 返回开始页后错过画面。截图与 Core 证据冲突时保留两份证据并进入待核验状态，不会把截图二星覆盖成三星。
+
+关键步骤、真实截图验收集和全自动验收标准见
+[`OBSERVABILITY.md`](OBSERVABILITY.md)。
 
 验证一张结算截图：
 

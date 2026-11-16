@@ -65,6 +65,16 @@ class TrialScheduler:
     def record_pause(self, reason: str = "execution paused") -> None:
         self.terminate(RunPhase.PAUSED, reason)
 
+    def resume_after_recovery(self, evidence_id: str) -> None:
+        """Resume only after an operator confirms the scene was recovered."""
+
+        if self.phase is not RunPhase.PAUSED:
+            raise ValueError("scheduler is not paused")
+        if not evidence_id.strip():
+            raise ValueError("recovery evidence id is required")
+        self.phase = RunPhase.PREPARING
+        self.terminal_reason = None
+
     def next_attempt(self) -> TrialAttempt | None:
         if self.phase.terminal:
             return None
@@ -129,7 +139,11 @@ class TrialScheduler:
                     "unknown verification limit reached",
                 )
             else:
-                self.phase = RunPhase.PREPARING
+                self.terminate(
+                    RunPhase.PAUSED,
+                    "unknown result requires scene recovery before another "
+                    "formal attempt",
+                )
             self.current = None
             return
 

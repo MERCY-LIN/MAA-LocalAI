@@ -1,6 +1,6 @@
 # MAA LocalAI Auto-Push Status
 
-Updated: 2026-11-12
+Updated: 2026-11-16
 
 ## Current milestone
 
@@ -20,6 +20,21 @@ OpenCV result verification, and auditable per-round metrics.
 - Trial scheduler that defaults to a formal run; drills are optional only.
 - JSON debug CLI with run/attempt IDs, atomic status, append-only callbacks,
   preflight screenshots, bounded stop requests, and saved-result replay.
+- Shared `StageExecutionConfig` validation for single-stage and campaign runs,
+  including `verify_threshold` and the same formal-battle safety defaults.
+- Settlement capture triggered from the MaaCore three-star callback before Core
+  leaves the result page; both `StageDrops-Stars-3` resource names normalize to
+  one callback label.
+- Conservative screenshot/Core evidence reconciliation. Conflicting evidence
+  is preserved as `conflict`, never promoted to a three-star success.
+- Unique full-roster lineup assignment with separate `requirements_satisfied`
+  and attemptable-low-investment states. Campaign selection only starts jobs
+  whose declared elite, level, skill, module, substitution, and uniqueness
+  constraints are satisfied.
+- Unknown settlement results pause the trial scheduler until explicit recovery
+  evidence is recorded. Exact stage/job binding is checked before preflight.
+- Structured step evidence, external real-screenshot corpus checks, and replay
+  of saved recognition, callback state transitions, and evidence decisions.
 - Numeric MaaCore callback protocol with task-id correlation, explicit terminal
   phases, screenshot sequence/timestamps, and a Python/WPF device mutex.
 - Per-round records for Computer Use operations, screenshots, tool calls,
@@ -38,6 +53,12 @@ OpenCV result verification, and auditable per-round metrics.
 - The next milestone is to validate the JSON debugging CLI against one real
   formal stage, then add active three-star impossibility detection and verified
   safe battle exit.
+- A human-reviewed real-screenshot corpus has not been supplied or run in this
+  checkout, so recognition accuracy against game-version changes remains
+  `UNVERIFIED`.
+- Live scheduling replay, automatic post-conflict recovery, candidate switching,
+  whole-campaign persistence, active impossibility detection, and verified safe
+  battle exit remain incomplete.
 
 ## Safety boundaries
 

@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import subprocess
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -20,6 +21,7 @@ import cv2
 
 from .adb import AdbClient, AdbError
 from .device_control import DeviceBusyError, DeviceControlLease
+from .execution import DEFAULT_VERIFY_THRESHOLD, StageExecutionConfig
 from .evidence import (
     ACTIVE_RUN_FILE,
     EvidenceError,
@@ -38,21 +40,31 @@ from .maa_core import (
     MaaCoreError,
     MaaEvent,
     MaaCoreLibrary,
+    event_has_three_star_result,
     run_copilot_file,
     summarize_events,
 )
 from .metrics import BudgetExceeded, BudgetLimits, RoundMetrics, TestResult
 from .planner import load_roster
 from .recognizer import decode_png
+from .recognition_acceptance import (
+    report_payload,
+    run_recognition_corpus,
+)
 from .state_memory import VisualStateMemory
 from .states import RunPhase
 from .strategy import (
-    candidate_has_hard_elite_gap,
+    CopilotStrategy,
+    candidate_has_hard_requirement_gap,
     collect_strategy_files,
     job_is_raid_only,
     rank_strategies,
 )
-from .verifier import BattleResultVerifier
+from .verifier import (
+    BattleResultVerifier,
+    ResultVerification,
+    resolve_battle_evidence,
+)
 
 
 DEFAULT_PACKAGE_DIR = Path(r"D:\work\CodexOutputs\MAA-LocalAI")
@@ -489,6 +501,26 @@ def _capture_verified_result(
     return verification, screenshots
 
 
+def _capture_single_result(
+    *,
+    adb_path: Path,
+    address: str,
+    destination: Path,
+    metrics: RoundMetrics,
+    verifier: BattleResultVerifier,
+) -> tuple[dict[str, Any], ResultVerification]:
+    screenshot = _capture_screenshot(
+        adb_path=adb_path,
+        address=address,
+        destination=destination,
+        metrics=metrics,
+    )
+    image = cv2.imread(str(destination), cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError("unable to decode settlement screenshot")
+    return screenshot, verifier.verify(image, metrics=metrics)
+
+
 def _formation_from_copilot(path: Path | None) -> dict[str, Any]:
     if path is None or not path.is_file():
         return {
@@ -499,6 +531,11 @@ def _formation_from_copilot(path: Path | None) -> dict[str, Any]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exception:
         return {"status": "UNKNOWN", "reason": str(exception)}
+    if isinstance(payload, dict) and isinstance(payload.get("content"), str):
+        try:
+            payload = json.loads(payload["content"])
+        except json.JSONDecodeError as exception:
+            return {"status": "UNKNOWN", "reason": str(exception)}
     operators = payload.get("opers")
     if not isinstance(operators, list):
         operators = []
@@ -523,6 +560,25 @@ def _formation_from_copilot(path: Path | None) -> dict[str, Any]:
         "operators": formation,
         "copilot_sha256": _hash_file(path),
     }
+
+
+def _validate_stage_job(
+    copilot_path: Path,
+    stage: str,
+) -> CopilotStrategy:
+    """Load one Copilot plan and require exact stage identity."""
+
+    strategy = CopilotStrategy.load(copilot_path)
+    if not strategy.stage_id:
+        raise EvidenceError(
+            f"Copilot job has no stage_name: {copilot_path}"
+        )
+    if strategy.stage_id != stage:
+        raise EvidenceError(
+            "Copilot stage mismatch: "
+            f"requested={stage!r}, job={strategy.stage_id!r}"
+        )
+    return strategy
 
 
 def _snapshot_payload(
@@ -724,7 +780,16 @@ def _write_maa_event(store: RunStore, event: MaaEvent) -> None:
         )
 
 
-def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
+def _run_stage(
+    arguments: argparse.Namespace | StageExecutionConfig,
+) -> tuple[dict[str, Any], int]:
+    config = (
+        arguments
+        if isinstance(arguments, StageExecutionConfig)
+        else StageExecutionConfig.from_arguments(arguments)
+    )
+    config.validate()
+    arguments = config.to_namespace()
     if not arguments.confirm_formal_battle:
         raise EvidenceError(
             "run-stage requires --confirm-formal-battle after reviewing "
@@ -771,6 +836,11 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
     ensure_no_active_run(evidence_root)
     store = RunStore(evidence_root)
     store.mark_active()
+    artifacts: list[str] = [
+        str(store.manifest_path),
+        str(store.status_path),
+        str(store.events_path),
+    ]
     try:
         store.create_manifest(
             {
@@ -783,9 +853,9 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 "user_dir": str(user_dir),
                 "copilot": str(copilot_path),
                 "state_memory_dir": str(state_memory_dir),
-            "formation_enabled": arguments.formation,
-            "ignore_requirements": arguments.ignore_requirements,
-            "operbox_data_path": arguments.operbox_data,
+                "formation_enabled": arguments.formation,
+                "ignore_requirements": arguments.ignore_requirements,
+                "operbox_data_path": arguments.operbox_data,
                 "formation": _formation_from_copilot(copilot_path),
                 "versions": {
                     "maa_core": _maa_version(dll_path),
@@ -806,14 +876,54 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
             copilot=str(copilot_path),
             safe_exit_verified=False,
         )
+        try:
+            _validate_stage_job(copilot_path, arguments.stage)
+        except (EvidenceError, OSError, ValueError) as exception:
+            metrics.add_test(
+                TestResult(
+                    name="stage-job-binding",
+                    success=False,
+                    detail=str(exception),
+                    strategy_path=str(copilot_path),
+                )
+            )
+            metrics.finish()
+            metrics_path = metrics.write(store.run_dir / "metrics.json")
+            artifacts.append(str(metrics_path))
+            store.update_status(
+                RunPhase.UNKNOWN,
+                completed_at=utc_now(),
+                outcome="BLOCKED_STAGE_MISMATCH",
+                error=str(exception),
+                safe_exit_verified=False,
+            )
+            store.append_event(
+                "stage_binding_blocked",
+                {
+                    "stage": arguments.stage,
+                    "copilot": str(copilot_path),
+                    "error": str(exception),
+                },
+            )
+            return (
+                result_envelope(
+                    "run-stage",
+                    "BLOCKED",
+                    run_id=store.run_id,
+                    attempt_id=store.attempt_id,
+                    data={
+                        "stage": arguments.stage,
+                        "copilot": str(copilot_path),
+                        "outcome": "BLOCKED_STAGE_MISMATCH",
+                    },
+                    errors=[str(exception)],
+                    artifacts=artifacts,
+                ),
+                2,
+            )
     except BaseException:
         store.clear_active()
         raise
-    artifacts: list[str] = [
-        str(store.manifest_path),
-        str(store.status_path),
-        str(store.events_path),
-    ]
     device_lease = DeviceControlLease(
         arguments.address,
         timeout_seconds=0,
@@ -895,6 +1005,36 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
             ),
         }
         store.append_event("preflight_state_recognized", preflight_payload)
+        preflight_safe = (
+            preflight_state.known
+            and _is_safe_preflight_state(
+                preflight_state.name,
+                arguments.stage,
+            )
+        )
+        store.append_step(
+            name="preflight",
+            preconditions={
+                "device_exclusive": True,
+                "maa_process_absent": True,
+                "stage_job_exact": True,
+            },
+            action="capture and recognize the current game page",
+            postconditions={
+                "state_known": preflight_state.known,
+                "safe_to_start": preflight_safe,
+            },
+            timeout_seconds=10,
+            evidence={
+                "screenshot": preflight_image_payload,
+                "state": preflight_payload,
+            },
+            failure=(
+                None
+                if preflight_safe
+                else f"preflight state rejected: {preflight_state.name}"
+            ),
+        )
         if (
             not preflight_state.known
             or not _is_safe_preflight_state(
@@ -932,6 +1072,112 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 2,
             )
         store.update_status(RunPhase.RUNNING, safe_exit_verified=False)
+        verifier = BattleResultVerifier(
+            template_root,
+            threshold=arguments.verify_threshold,
+        )
+        settlement_capture: dict[str, Any] = {}
+        settlement_lock = threading.Lock()
+
+        def capture_core_settlement(event: MaaEvent) -> None:
+            _write_maa_event(store, event)
+            if not event_has_three_star_result(event):
+                return
+            with settlement_lock:
+                if settlement_capture.get("attempted"):
+                    return
+                settlement_capture["attempted"] = True
+                destination = (
+                    store.run_dir / "artifacts" / "settlement-at-core-star.png"
+                )
+                try:
+                    screenshot, captured_verification = _capture_single_result(
+                        adb_path=adb_path,
+                        address=arguments.address,
+                        destination=destination,
+                        metrics=metrics,
+                        verifier=verifier,
+                    )
+                except (AdbError, OSError, ValueError) as exception:
+                    settlement_capture["error"] = str(exception)
+                    store.append_step(
+                        name="settlement-capture",
+                        preconditions={
+                            "maa_core_three_star_callback": True,
+                            "capture_slot_available": True,
+                        },
+                        action=(
+                            "capture and recognize settlement before Core "
+                            "leaves the result screen"
+                        ),
+                        postconditions={
+                            "screenshot_saved": False,
+                            "recognition_status": "unknown",
+                        },
+                        timeout_seconds=0,
+                        evidence={"timing": "maa_core_three_star_callback"},
+                        failure=str(exception),
+                    )
+                    store.append_event(
+                        "settlement_capture_failed",
+                        {
+                            "timing": "maa_core_three_star_callback",
+                            "error": str(exception),
+                        },
+                    )
+                    return
+                settlement_capture.update(
+                    {
+                        "screenshot": screenshot,
+                        "verification": captured_verification,
+                    }
+                )
+                evidence_path = (
+                    store.run_dir
+                    / "artifacts"
+                    / "settlement-at-core-star-verification.json"
+                )
+                write_json_atomic(
+                    evidence_path,
+                    {
+                        "schema_version": "localai.debug/v1",
+                        "run_id": store.run_id,
+                        "attempt_id": store.attempt_id,
+                        "timing": "maa_core_three_star_callback",
+                        "screenshot": screenshot,
+                        "verification": asdict(captured_verification),
+                    },
+                )
+                store.append_step(
+                    name="settlement-capture",
+                    preconditions={
+                        "maa_core_three_star_callback": True,
+                        "capture_slot_available": True,
+                    },
+                    action=(
+                        "capture and recognize settlement before Core leaves "
+                        "the result screen"
+                    ),
+                    postconditions={
+                        "screenshot_saved": True,
+                        "recognition_status": captured_verification.status,
+                    },
+                    timeout_seconds=0,
+                    evidence={
+                        "timing": "maa_core_three_star_callback",
+                        "screenshot": screenshot,
+                        "verification_path": str(evidence_path.resolve()),
+                    },
+                )
+                store.append_event(
+                    "settlement_captured",
+                    {
+                        "timing": "maa_core_three_star_callback",
+                        "screenshot": screenshot,
+                        "verification": asdict(captured_verification),
+                        "evidence_path": str(evidence_path.resolve()),
+                    },
+                )
 
         events = run_copilot_file(
             dll_path=dll_path,
@@ -952,14 +1198,25 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
             support_unit_usage=arguments.support_unit_usage,
             wait_until_end=True,
             is_raid=arguments.is_raid,
-            event_sink=lambda event: _write_maa_event(store, event),
+            event_sink=capture_core_settlement,
             stop_requested=store.stop_requested,
         )
         summary = summarize_events(events)
         result_path = store.run_dir / "artifacts" / "result.png"
-        verification = None
-        capture_error: str | None = None
-        result_image = None
+        verification = settlement_capture.get("verification")
+        capture_error: str | None = settlement_capture.get("error")
+        result_image = settlement_capture.get("screenshot")
+        if result_image is not None:
+            artifacts.extend(
+                [
+                    str(result_image["path"]),
+                    str(
+                        store.run_dir
+                        / "artifacts"
+                        / "settlement-at-core-star-verification.json"
+                    ),
+                ]
+            )
         stop_requested = store.stop_requested()
         can_verify = (
             not stop_requested
@@ -967,30 +1224,50 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
             and not summary["task_errors"]
             and not summary["connection_errors"]
         )
+        store.append_step(
+            name="formal-battle",
+            preconditions={
+                "preflight_safe": True,
+                "stage_job_exact": True,
+                "sanity_potions_disabled": True,
+                "originite_prime_disabled": True,
+            },
+            action="execute one formal MaaCore Copilot clear",
+            postconditions={
+                "terminal_state": summary["terminal_state"],
+                "verification_required": True,
+                "result_verified": False,
+            },
+            timeout_seconds=arguments.timeout,
+            evidence={
+                "task": summary,
+                "copilot": str(copilot_path),
+                "stop_requested": stop_requested,
+            },
+            failure=(
+                None
+                if summary["terminal_state"] == "COMPLETED"
+                else summary["terminal_state"]
+            ),
+        )
         if can_verify:
             store.update_status(RunPhase.VERIFYING, task=summary)
-            try:
-                verifier = BattleResultVerifier(
-                    template_root,
-                    threshold=arguments.verify_threshold,
-                )
-                verification, result_screenshots = _capture_verified_result(
-                    adb_path=adb_path,
-                    address=arguments.address,
-                    destination=result_path,
-                    metrics=metrics,
-                    verifier=verifier,
-                )
-                result_image = result_screenshots[-1]
-                artifacts.extend(
-                    item["path"] for item in result_screenshots
-                )
-                artifacts.append(
-                    str(store.run_dir / "artifacts" / "result-verification.json")
-                )
-            except (AdbError, OSError, ValueError) as exception:
-                capture_error = str(exception)
-                result_image = None
+            if verification is None:
+                try:
+                    verification, result_screenshots = _capture_verified_result(
+                        adb_path=adb_path,
+                        address=arguments.address,
+                        destination=result_path,
+                        metrics=metrics,
+                        verifier=verifier,
+                    )
+                    result_image = result_screenshots[-1]
+                    artifacts.extend(
+                        item["path"] for item in result_screenshots
+                    )
+                except (AdbError, OSError, ValueError) as exception:
+                    capture_error = str(exception)
+                    result_image = None
         elif summary["terminal_state"] == "STOPPED" or stop_requested:
             store.update_status(RunPhase.STOPPING, task=summary)
         elif summary["terminal_state"] == "DISCONNECTED":
@@ -1002,9 +1279,12 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
 
         core_star_evidence = summary.get("maa_three_star_evidence") or []
         core_three_star = bool(summary.get("maa_three_star"))
-        verification_status = verification.status if verification else "unknown"
-        if core_three_star:
-            verification_status = "three_star"
+        resolution = resolve_battle_evidence(
+            verification,
+            core_three_star=core_three_star,
+            core_evidence=core_star_evidence,
+        )
+        verification_status = resolution.status
         outcome = classify_outcome(
             stop_requested=stop_requested,
             task_completed=bool(summary["task_completed"]),
@@ -1013,45 +1293,75 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
             terminal_state=str(summary["terminal_state"]),
             verification_status=verification_status,
         )
-        verification_payload = (
-            {
-                "status": "three_star",
-                "stars": 3,
-                "confidence": max(
-                    (
-                        float(item.get("score") or 0.0)
-                        for item in core_star_evidence
-                    ),
-                    default=0.0,
+        store.append_step(
+            name="evidence-decision",
+            preconditions={
+                "task_terminal_state": summary["terminal_state"],
+                "screenshot_present": verification is not None,
+                "maa_core_star_present": core_three_star,
+            },
+            action=(
+                "reconcile screenshot and MaaCore evidence without promoting "
+                "conflicting results"
+            ),
+            postconditions={
+                "status": resolution.status,
+                "conflict": resolution.conflict,
+                "run_phase": outcome.value,
+            },
+            timeout_seconds=0,
+            evidence={
+                "resolution": asdict(resolution),
+                "visual": (
+                    asdict(verification) if verification is not None else None
                 ),
-                "evidence": core_star_evidence,
-                "needs_computer_use": False,
-                "source": "maa_core_stage_drops_stars_3",
-            }
-            if core_three_star
-            else (asdict(verification) if verification is not None else None)
+                "maa_core": core_star_evidence,
+            },
+            failure=resolution.reason if resolution.conflict else None,
         )
-        if verification_payload is not None:
-            write_json_atomic(
-                store.run_dir / "artifacts" / "result-verification.json",
-                {
-                    "schema_version": "localai.debug/v1",
-                    "run_id": store.run_id,
-                    "attempt_id": store.attempt_id,
-                    "verification": verification_payload,
-                },
-            )
+        verification_payload: dict[str, Any] = {
+            "status": resolution.status,
+            "stars": resolution.stars,
+            "confidence": resolution.confidence,
+            "needs_computer_use": (
+                verification.needs_computer_use
+                if verification is not None
+                else False
+            ),
+            "evidence": (
+                list(asdict(verification)["evidence"])
+                if verification is not None
+                else []
+            ),
+            "source": "+".join(resolution.sources) or None,
+            "conflict": resolution.conflict,
+            "reason": resolution.reason,
+            "visual_evidence": (
+                asdict(verification) if verification is not None else None
+            ),
+            "maa_core_evidence": core_star_evidence,
+        }
+        verification_path = (
+            store.run_dir / "artifacts" / "result-verification.json"
+        )
+        write_json_atomic(
+            verification_path,
+            {
+                "schema_version": "localai.debug/v1",
+                "run_id": store.run_id,
+                "attempt_id": store.attempt_id,
+                "verification": verification_payload,
+                "resolution": asdict(resolution),
+            },
+        )
+        artifacts.append(str(verification_path))
         metrics.add_test(
             TestResult(
                 name="formal-run-outcome",
                 success=outcome is RunPhase.SUCCEEDED,
                 detail=outcome.value,
                 strategy_path=str(copilot_path),
-                stars=(
-                    verification.stars
-                    if verification is not None
-                    else (3 if core_three_star else None)
-                ),
+                stars=resolution.stars,
             )
         )
         metrics.finish()
@@ -1063,6 +1373,8 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
             "task": summary,
             "verification": verification_payload,
             "verification_status": verification_status,
+            "verification_conflict": resolution.conflict,
+            "verification_reason": resolution.reason,
             "capture_error": capture_error,
             "result_screenshot": result_image,
             "stop_requested": stop_requested,
@@ -1082,9 +1394,13 @@ def _run_stage(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
             task=summary,
             verification=verification_payload,
             preflight_state=preflight_payload,
-            result_screenshot=str(result_path.resolve())
-            if result_path.is_file()
-            else None,
+            result_screenshot=(
+                result_image.get("path")
+                if isinstance(result_image, dict)
+                else str(result_path.resolve())
+                if result_path.is_file()
+                else None
+            ),
             safe_exit_verified=False,
         )
         store.append_event("run_finished", data)
@@ -1313,29 +1629,51 @@ def _replay(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
         threshold=arguments.threshold,
     ).verify(image, metrics=metrics)
     events, _ = store.read_events(limit=100_000)
-    callback_summary = summarize_events(
-        [
-            MaaEvent(
-                message_id=int(event["data"].get("message_id", 0)),
-                details=dict(event["data"].get("details") or {}),
-            )
-            for event in events
-            if event.get("type") == "maa_callback"
-            and isinstance(event.get("data"), dict)
-        ]
+    callback_events = [
+        MaaEvent(
+            message_id=int(event["data"].get("message_id", 0)),
+            details=dict(event["data"].get("details") or {}),
+        )
+        for event in events
+        if event.get("type") == "maa_callback"
+        and isinstance(event.get("data"), dict)
+    ]
+    callback_summary = summarize_events(callback_events)
+    transition_trace = []
+    for index, event in enumerate(callback_events, start=1):
+        summary = summarize_events(callback_events[:index])
+        transition_trace.append(
+            {
+                "event_index": index,
+                "message_id": event.message_id,
+                "message_name": event.message_name,
+                "task_id": event.task_id,
+                "terminal_state": summary["terminal_state"],
+                "phase": summary["phase"],
+            }
+        )
+    evidence_resolution = resolve_battle_evidence(
+        verification,
+        core_three_star=bool(callback_summary["maa_three_star"]),
+        core_evidence=callback_summary["maa_three_star_evidence"],
     )
     previous = status.get("verification")
     replay = {
         "image": str(image_path),
         "verification": asdict(verification),
         "callback_summary": callback_summary,
+        "transition_trace": transition_trace,
+        "evidence_resolution": asdict(evidence_resolution),
         "previous_verification": previous,
         "matches_previous": (
             isinstance(previous, dict)
-            and previous.get("status") == verification.status
-            and previous.get("stars") == verification.stars
+            and previous.get("status") == evidence_resolution.status
+            and previous.get("stars") == evidence_resolution.stars
         ),
-        "scope": "result recognition only; scheduling replay is not implemented",
+        "scope": (
+            "saved result recognition, callback state transitions, and "
+            "evidence reconciliation; live device replay is not implemented"
+        ),
     }
     replay_path = store.run_dir / "artifacts" / "replay.json"
     write_json_atomic(
@@ -1361,6 +1699,46 @@ def _replay(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
             artifacts=[str(replay_path), str(metrics_path), str(image_path)],
         ),
         0 if verification.status == "three_star" else 2,
+    )
+
+
+def _recognition_check(
+    arguments: argparse.Namespace,
+) -> tuple[dict[str, Any], int]:
+    """Evaluate an external corpus of real, human-confirmed captures."""
+
+    package_dir = _resolve(arguments.package_dir, _default_package_dir())
+    template_root = _resolve(
+        arguments.template_root,
+        package_dir / "resource" / "template" / "Battle",
+    )
+    report = run_recognition_corpus(
+        arguments.corpus,
+        template_root=template_root,
+        threshold=arguments.threshold,
+    )
+    payload = report_payload(report)
+    artifacts: list[str] = []
+    if arguments.report:
+        report_path = Path(arguments.report).expanduser().resolve()
+        write_json_atomic(
+            report_path,
+            {
+                "schema_version": "localai.debug/v1",
+                "command": "recognition-check",
+                "timestamp": utc_now(),
+                "data": payload,
+            },
+        )
+        artifacts.append(str(report_path))
+    return (
+        result_envelope(
+            "recognition-check",
+            "OK" if report.passed else "UNVERIFIED",
+            data=payload,
+            artifacts=artifacts,
+        ),
+        0 if report.passed else 2,
     )
 
 
@@ -1419,9 +1797,8 @@ def _run_campaign(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
         eligible = [
             candidate
             for candidate in candidates
-            if candidate.runnable
-            and not candidate.missing
-            and not candidate_has_hard_elite_gap(candidate)
+            if candidate.requirements_satisfied
+            and not candidate_has_hard_requirement_gap(candidate)
             and (
                 not isinstance(getattr(candidate.strategy, "raw", None), dict)
                 or not job_is_raid_only(candidate.strategy.raw)
@@ -1437,8 +1814,7 @@ def _run_campaign(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
             )
             break
         selected = eligible[0]
-        stage_namespace = argparse.Namespace(
-            command="run-stage",
+        stage_config = StageExecutionConfig(
             stage=stage,
             copilot=str(selected.strategy.strategy_id),
             package_dir=str(package_dir),
@@ -1452,19 +1828,29 @@ def _run_campaign(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
             address=arguments.address,
             connect_config=arguments.connect_config,
             timeout=arguments.timeout,
+            verify_threshold=float(
+                getattr(
+                    arguments,
+                    "verify_threshold",
+                    DEFAULT_VERIFY_THRESHOLD,
+                )
+            ),
             formation=True,
             formation_index=0,
             add_trust=False,
-            ignore_requirements=True,
+            ignore_requirements=False,
             operbox_data=str(arguments.operbox_data or arguments.roster),
             support_unit_usage=0,
             confirm_formal_battle=True,
         )
-        envelope, exit_code = _run_stage(stage_namespace)
+        stage_config.validate()
+        envelope, exit_code = _run_stage(stage_config)
         stage_results.append(
             {
                 "stage": stage,
                 "job": str(selected.strategy.strategy_id),
+                "lineup": [asdict(slot) for slot in selected.lineup],
+                "requirements_satisfied": selected.requirements_satisfied,
                 "run_id": envelope.get("run_id"),
                 "attempt_id": envelope.get("attempt_id"),
                 "status": envelope.get("status"),
@@ -1572,6 +1958,11 @@ def build_parser() -> argparse.ArgumentParser:
     run_campaign.add_argument("--template-root")
     run_campaign.add_argument("--state-memory-dir")
     run_campaign.add_argument(
+        "--verify-threshold",
+        type=float,
+        default=DEFAULT_VERIFY_THRESHOLD,
+    )
+    run_campaign.add_argument(
         "--round-name",
         default="localai-debug-campaign",
     )
@@ -1580,6 +1971,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
     )
     run_campaign.set_defaults(handler=_run_campaign)
+
+    recognition_check = subparsers.add_parser(
+        "recognition-check",
+        help="evaluate an external real-screenshot acceptance corpus",
+    )
+    recognition_check.add_argument(
+        "--package-dir",
+        default=str(_default_package_dir()),
+    )
+    recognition_check.add_argument("--template-root")
+    recognition_check.add_argument("--corpus", required=True)
+    recognition_check.add_argument("--threshold", type=float, default=0.86)
+    recognition_check.add_argument("--report")
+    recognition_check.set_defaults(handler=_recognition_check)
 
     status = subparsers.add_parser("status", help="read one run status")
     status.add_argument("--evidence-root", default=str(_default_evidence_root()))

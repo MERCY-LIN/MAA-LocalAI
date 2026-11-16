@@ -72,6 +72,11 @@ SESSION_TERMINAL_MESSAGES = {
     CoreMessage.INIT_FAILED,
     CoreMessage.DESTROYED,
 }
+THREE_STAR_TASK_NAME = "StageDrops-Stars-3"
+THREE_STAR_TASK_ALIASES = {
+    THREE_STAR_TASK_NAME,
+    f"Copilot@{THREE_STAR_TASK_NAME}",
+}
 
 
 @dataclass(frozen=True)
@@ -114,6 +119,26 @@ class MaaEvent:
 
 def _message_name(event: MaaEvent) -> str:
     return event.message_name
+
+
+def canonical_task_name(value: Any) -> str:
+    """Normalize MAA resource task names without matching unrelated suffixes."""
+
+    name = str(value or "")
+    return name[len("Copilot@") :] if name.startswith("Copilot@") else name
+
+
+def event_has_three_star_result(event: MaaEvent) -> bool:
+    """Return whether one callback carries a recognized three-star result."""
+
+    task_details = event.details.get("details")
+    if not isinstance(task_details, dict):
+        return False
+    task_name = str(task_details.get("task") or "")
+    return (
+        task_name in THREE_STAR_TASK_ALIASES
+        and isinstance(task_details.get("result"), dict)
+    )
 
 
 def summarize_events(
@@ -183,13 +208,15 @@ def summarize_events(
         task_details = event.details.get("details")
         if not isinstance(task_details, dict):
             continue
-        if task_details.get("task") != "StageDrops-Stars-3":
+        task_name = str(task_details.get("task") or "")
+        if task_name not in THREE_STAR_TASK_ALIASES:
             continue
         result = task_details.get("result")
         if isinstance(result, dict):
             star_matches.append(
                 {
-                    "task": "StageDrops-Stars-3",
+                    "task": canonical_task_name(task_name),
+                    "source_task": task_name,
                     "score": result.get("score"),
                     "rect": result.get("rect"),
                     "template": result.get("template"),

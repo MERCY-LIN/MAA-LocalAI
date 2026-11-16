@@ -125,7 +125,11 @@ def test_executor_uses_budgeted_computer_use_only_for_unknown():
     report = executor.run()
 
     assert not report.completed
-    assert report.stopped_reason == "attempt budget exhausted"
+    assert report.stopped_reason == (
+        "unknown result requires scene recovery before another formal "
+        "attempt"
+    )
+    assert scheduler.phase is RunPhase.PAUSED
     assert fallback_calls == 1
     assert metrics.counters["computer_use_operations"] == 1
 

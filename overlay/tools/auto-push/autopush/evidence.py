@@ -282,6 +282,36 @@ class RunStore:
                 os.fsync(handle.fileno())
         return event
 
+    def append_step(
+        self,
+        *,
+        name: str,
+        preconditions: dict[str, Any],
+        action: str,
+        postconditions: dict[str, Any],
+        timeout_seconds: float,
+        evidence: dict[str, Any],
+        failure: str | None = None,
+    ) -> dict[str, Any]:
+        """Append one auditable step with all required control fields."""
+
+        if not name.strip() or not action.strip():
+            raise EvidenceError("step name and action are required")
+        if timeout_seconds < 0:
+            raise EvidenceError("step timeout must be non-negative")
+        return self.append_event(
+            "step",
+            {
+                "name": name,
+                "preconditions": preconditions,
+                "action": action,
+                "postconditions": postconditions,
+                "timeout_seconds": timeout_seconds,
+                "evidence": evidence,
+                "failure": failure,
+            },
+        )
+
     def read_events(
         self,
         *,

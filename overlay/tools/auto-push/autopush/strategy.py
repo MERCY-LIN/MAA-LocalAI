@@ -52,6 +52,14 @@ def candidate_has_hard_elite_gap(candidate: CandidateEvaluation) -> bool:
     return any(": elite " in item for item in candidate.diagnostics)
 
 
+def candidate_has_hard_requirement_gap(
+    candidate: CandidateEvaluation,
+) -> bool:
+    """Return whether requirements are not fully satisfied by the roster."""
+
+    return not candidate.requirements_satisfied
+
+
 @dataclass(frozen=True)
 class OperatorRequirement:
     """Minimum account state required by a Copilot operator entry."""
@@ -144,6 +152,17 @@ class CopilotStrategy:
 
 
 @dataclass(frozen=True)
+class LineupSlot:
+    """One concrete operator assignment in a strategy formation."""
+
+    source: str
+    requested: str
+    assigned: str
+    substitution: bool = False
+    support: bool = False
+
+
+@dataclass(frozen=True)
 class CandidateEvaluation:
     """Compatibility result for one local strategy."""
 
@@ -154,9 +173,27 @@ class CandidateEvaluation:
     substitutions: tuple[tuple[str, str], ...]
     support_needed: bool
     diagnostics: tuple[str, ...]
+    lineup: tuple[LineupSlot, ...] = ()
 
     @property
     def runnable(self) -> bool:
+        return self.status != "unavailable"
+
+    @property
+    def requirements_satisfied(self) -> bool:
+        """Whether every declared hard requirement is met without support."""
+
+        return (
+            self.status in {"ready", "substitution"}
+            and not self.support_needed
+            and not self.missing
+            and all(slot.assigned for slot in self.lineup)
+        )
+
+    @property
+    def attemptable(self) -> bool:
+        """Whether a lower-investment attempt can be explicitly considered."""
+
         return self.status != "unavailable"
 
 
@@ -277,6 +314,149 @@ def _best_group_option(
     )
 
 
+@dataclass(frozen=True)
+class _AssignmentChoice:
+    slot: LineupSlot
+    gaps: tuple[str, ...]
+    unverified: tuple[str, ...]
+
+
+def _slot_choices(
+    *,
+    source: str,
+    requested: str,
+    requirements: list[OperatorRequirement],
+    roster: dict[str, RosterOperator],
+    substitutions: dict[str, list[str]],
+    allow_support: bool,
+) -> list[_AssignmentChoice]:
+    choices: list[_AssignmentChoice] = []
+    direct = source == "direct"
+    for requirement in requirements:
+        operator = roster.get(requirement.name)
+        if operator is not None:
+            gaps, unverified = (
+                _assess_requirement(requirement, operator)
+                if requirement.requirements_declared
+                else ([], [f"{requirement.name}: requirements missing"])
+            )
+            choices.append(
+                _AssignmentChoice(
+                    slot=LineupSlot(
+                        source=source,
+                        requested=requested,
+                        assigned=requirement.name,
+                    ),
+                    gaps=tuple(gaps),
+                    unverified=tuple(unverified),
+                )
+            )
+        if not direct:
+            continue
+        for substitute_name in substitutions.get(requirement.name, []):
+            substitute = roster.get(substitute_name)
+            if substitute is None:
+                continue
+            gaps, unverified = (
+                _assess_requirement(requirement, substitute)
+                if requirement.requirements_declared
+                else ([], [f"{requirement.name}: requirements missing"])
+            )
+            choices.append(
+                _AssignmentChoice(
+                    slot=LineupSlot(
+                        source=source,
+                        requested=requirement.name,
+                        assigned=substitute_name,
+                        substitution=True,
+                    ),
+                    gaps=tuple(gaps),
+                    unverified=tuple(unverified),
+                )
+            )
+    if not choices and allow_support:
+        choices.append(
+            _AssignmentChoice(
+                slot=LineupSlot(
+                    source=source,
+                    requested=requested,
+                    assigned="SUPPORT",
+                    support=True,
+                ),
+                gaps=(),
+                unverified=(),
+            )
+        )
+    return choices
+
+
+def _unique_lineup(
+    slots: list[tuple[str, str, list[OperatorRequirement]]],
+    *,
+    roster: dict[str, RosterOperator],
+    substitutions: dict[str, list[str]],
+    allow_support: bool,
+) -> tuple[list[_AssignmentChoice] | None, list[str]]:
+    option_lists: list[list[_AssignmentChoice]] = []
+    missing: list[str] = []
+    for source, requested, requirements in slots:
+        choices = _slot_choices(
+            source=source,
+            requested=requested,
+            requirements=requirements,
+            roster=roster,
+            substitutions=substitutions,
+            allow_support=allow_support,
+        )
+        if not choices or all(choice.slot.support for choice in choices):
+            missing.append(requested)
+        option_lists.append(choices)
+    if len(missing) > 1:
+        return None, missing
+
+    ordered = sorted(
+        enumerate(option_lists),
+        key=lambda item: len(item[1]),
+    )
+    best: tuple[
+        tuple[int, int, int, int],
+        dict[int, _AssignmentChoice],
+    ] | None = None
+
+    def search(
+        position: int,
+        used: set[str],
+        assigned: list[tuple[int, _AssignmentChoice]],
+    ) -> None:
+        nonlocal best
+        if len(assigned) == len(ordered):
+            score = (
+                sum(len(item.gaps) for _, item in assigned),
+                sum(len(item.unverified) for _, item in assigned),
+                sum(item.slot.support for _, item in assigned),
+                sum(item.slot.substitution for _, item in assigned),
+            )
+            if best is None or score < best[0]:
+                best = (score, dict(assigned))
+            return
+        slot_index, choices = ordered[position]
+        for choice in choices:
+            assigned_name = choice.slot.assigned
+            if choice.slot.support or assigned_name not in used:
+                if not choice.slot.support:
+                    used.add(assigned_name)
+                assigned.append((slot_index, choice))
+                search(position + 1, used, assigned)
+                assigned.pop()
+                if not choice.slot.support:
+                    used.remove(assigned_name)
+
+    search(0, set(), [])
+    if best is None:
+        return None, missing
+    return [best[1][index] for index in range(len(slots))], []
+
+
 def evaluate_strategy(
     strategy: CopilotStrategy,
     roster: dict[str, RosterOperator],
@@ -287,78 +467,75 @@ def evaluate_strategy(
     """Evaluate without trusting model guesses about the account."""
 
     substitutions = substitutions or {}
-    missing: list[str] = []
+    slots: list[tuple[str, str, list[OperatorRequirement]]] = [
+        ("direct", requirement.name, [requirement])
+        for requirement in strategy.direct_operators
+    ]
+    slots.extend(
+        (
+            "group",
+            "/".join(requirement.name for requirement in group),
+            group,
+        )
+        for group in strategy.operator_groups
+    )
+    assignment, missing = _unique_lineup(
+        slots,
+        roster=roster,
+        substitutions=substitutions,
+        allow_support=allow_support,
+    )
     diagnostics: list[str] = []
     chosen_substitutions: list[tuple[str, str]] = []
-    degraded = 0
-    unverified = 0
-    missing_requirements = 0
-    unknown_fields = 0
-
-    for requirement in strategy.direct_operators:
-        operator = roster.get(requirement.name)
-        if operator is None:
-            replacement = next(
-                (
-                    name
-                    for name in substitutions.get(requirement.name, [])
-                    if name in roster
-                ),
-                None,
-            )
-            if replacement is None:
-                missing.append(requirement.name)
-            else:
-                chosen_substitutions.append((requirement.name, replacement))
-        else:
-            if not requirement.requirements_declared:
-                unverified += 1
-                missing_requirements += 1
-                diagnostics.append(
-                    f"{requirement.name}: requirements missing"
-                )
-            else:
-                gaps, unknown = _assess_requirement(requirement, operator)
-                if gaps:
-                    degraded += len(gaps)
-                    diagnostics.extend(gaps)
-                if unknown:
-                    unverified += 1
-                    unknown_fields += len(unknown)
-                    diagnostics.extend(unknown)
-
-    for group in strategy.operator_groups:
-        requirement, _, gaps, unknown, declared = _best_group_option(
-            group,
-            roster,
-        )
-        if gaps:
-            diagnostics.extend(gaps)
-            if gaps[0].startswith("none available"):
-                missing.append("/".join(operator.name for operator in group))
-            else:
-                degraded += len(gaps)
-        if unknown:
-            diagnostics.extend(unknown)
-            if not declared and requirement is not None:
-                unverified += 1
-                missing_requirements += 1
-            else:
-                unverified += 1
-                unknown_fields += len(unknown)
-
-    if len(missing) > 1:
+    lineup: list[LineupSlot] = []
+    if assignment is None:
         status = "unavailable"
-    elif chosen_substitutions:
-        status = "substitution"
-    elif missing:
-        status = "support" if allow_support else "unavailable"
-    elif degraded:
-        status = "degraded"
-    elif unverified:
-        status = "unverified"
+        if missing:
+            diagnostics.extend(
+                f"{name}: no available operator" for name in missing
+            )
+        else:
+            diagnostics.append(
+                "lineup conflict: no unique assignment for all required slots"
+            )
+        degraded = len(diagnostics)
+        unverified = 0
+        missing_requirements = 0
+        unknown_fields = 0
     else:
-        status = "ready"
+        degraded = sum(len(item.gaps) for item in assignment)
+        unverified = sum(bool(item.unverified) for item in assignment)
+        missing_requirements = sum(
+            any("requirements missing" in message for message in item.unverified)
+            for item in assignment
+        )
+        unknown_fields = sum(len(item.unverified) for item in assignment)
+        for item in assignment:
+            lineup.append(item.slot)
+            diagnostics.extend(item.gaps)
+            diagnostics.extend(item.unverified)
+            if item.slot.substitution:
+                chosen_substitutions.append(
+                    (item.slot.requested, item.slot.assigned)
+                )
+        support_needed = any(item.slot.support for item in assignment)
+        if support_needed:
+            missing = [
+                item.slot.requested
+                for item in assignment
+                if item.slot.support
+            ]
+            status = "support"
+        elif degraded:
+            status = "degraded"
+        elif unverified:
+            status = "unverified"
+        elif chosen_substitutions:
+            status = "substitution"
+        else:
+            status = "ready"
+        if support_needed:
+            degraded = max(degraded, len(missing))
 
     status_bonus = {
         "ready": 100.0,
@@ -384,6 +561,7 @@ def evaluate_strategy(
         substitutions=tuple(chosen_substitutions),
         support_needed=status == "support",
         diagnostics=tuple(diagnostics),
+        lineup=tuple(lineup),
     )
 
 

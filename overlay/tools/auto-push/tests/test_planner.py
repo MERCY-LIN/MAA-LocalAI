@@ -66,7 +66,7 @@ def _candidate():
                 "action_count": 1,
             },
         )(),
-        status="runnable",
+        status="ready",
         score=1.0,
         missing=[],
         substitutions=[],
@@ -86,6 +86,22 @@ def test_model_selector_accepts_fenced_json_with_trailing_text():
     )
 
     assert selection == 0
+
+
+def test_model_selector_never_sees_low_investment_unverified_candidates():
+    candidate = replace(_candidate(), status="unverified")
+
+    selection = choose_strategy_with_model(
+        _FakeModel(content='{"candidate":1,"reason":"unsafe"}'),
+        [candidate],
+        stage_id="act55side_ex05",
+        metrics=RoundMetrics(
+            round_name="model-requirements",
+            stage="act55side_ex05",
+        ),
+    )
+
+    assert selection is None
 
 
 def test_model_selection_failure_falls_back_to_local_ranking(

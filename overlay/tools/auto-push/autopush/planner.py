@@ -125,7 +125,7 @@ def choose_strategy_with_model(
     stage_id: str,
     metrics: RoundMetrics,
 ) -> int | None:
-    runnable = [item for item in candidates if item.runnable]
+    runnable = [item for item in candidates if item.requirements_satisfied]
     if not runnable:
         return None
     system_prompt = """
@@ -217,15 +217,20 @@ def build_round_plan(
     metrics.add_test(
         TestResult(
             name="strategy-ranking",
-            success=any(item.runnable for item in candidates),
+            success=any(item.requirements_satisfied for item in candidates),
             detail=(
                 f"total={len(candidates)} "
-                f"runnable={sum(item.runnable for item in candidates)}"
+                "requirements_satisfied="
+                f"{sum(item.requirements_satisfied for item in candidates)}"
             ),
         )
     )
 
-    selected_index = 0 if any(item.runnable for item in candidates) else None
+    selected_index = (
+        0
+        if any(item.requirements_satisfied for item in candidates)
+        else None
+    )
     selection_reason = "local ranking"
     if model_client is not None and selected_index is not None:
         try:
@@ -261,6 +266,8 @@ def build_round_plan(
                 "substitutions": selected.substitutions,
                 "support_needed": selected.support_needed,
                 "diagnostics": selected.diagnostics,
+                "requirements_satisfied": selected.requirements_satisfied,
+                "lineup": [asdict(slot) for slot in selected.lineup],
                 "action_count": selected.strategy.action_count,
             }
             if selected is not None
@@ -283,6 +290,8 @@ def build_round_plan(
                 "missing": item.missing,
                 "substitutions": item.substitutions,
                 "support_needed": item.support_needed,
+                "requirements_satisfied": item.requirements_satisfied,
+                "lineup": [asdict(slot) for slot in item.lineup],
             }
             for item in candidates
         ],
@@ -302,7 +311,9 @@ def build_round_plan(
     metrics.add_test(
         TestResult(
             name="plan-selection",
-            success=selected is not None and selected.runnable,
+            success=(
+                selected is not None and selected.requirements_satisfied
+            ),
             detail=selection_reason,
             strategy_path=selected.strategy.strategy_id if selected else None,
         )

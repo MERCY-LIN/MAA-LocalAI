@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -28,6 +29,89 @@ class ResultVerification:
     confidence: float
     evidence: tuple[TemplateEvidence, ...]
     needs_computer_use: bool
+
+
+@dataclass(frozen=True)
+class EvidenceResolution:
+    """Reconcile screenshot and MaaCore evidence without promoting conflicts."""
+
+    status: str
+    stars: int | None
+    confidence: float
+    conflict: bool
+    reason: str
+    sources: tuple[str, ...]
+
+
+def resolve_battle_evidence(
+    visual: ResultVerification | None,
+    *,
+    core_three_star: bool,
+    core_evidence: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+) -> EvidenceResolution:
+    """Choose a conservative result while retaining both evidence sources."""
+
+    visual_status = visual.status if visual is not None else "unknown"
+    visual_confidence = visual.confidence if visual is not None else 0.0
+    sources: list[str] = []
+    if visual is not None:
+        sources.append("screenshot")
+    if core_evidence:
+        sources.append("maa_core")
+
+    if visual_status in {"three_star", "two_star", "non_three_star"}:
+        visual_three_star = visual_status == "three_star"
+        if core_three_star and not visual_three_star:
+            return EvidenceResolution(
+                status="conflict",
+                stars=None,
+                confidence=visual_confidence,
+                conflict=True,
+                reason="screenshot disagrees with MaaCore three-star callback",
+                sources=tuple(sources),
+            )
+        if visual_three_star and core_three_star:
+            return EvidenceResolution(
+                status="three_star",
+                stars=3,
+                confidence=visual_confidence,
+                conflict=False,
+                reason="screenshot and MaaCore both report three stars",
+                sources=tuple(sources),
+            )
+        return EvidenceResolution(
+            status=visual_status,
+            stars=visual.stars if visual is not None else None,
+            confidence=visual_confidence,
+            conflict=False,
+            reason=(
+                "screenshot provides an explicit result"
+                if not core_three_star
+                else "unreachable"
+            ),
+            sources=tuple(sources),
+        )
+
+    if core_three_star:
+        return EvidenceResolution(
+            status="conflict",
+            stars=None,
+            confidence=visual_confidence,
+            conflict=True,
+            reason=(
+                "MaaCore reports three stars but the settlement screenshot is "
+                "missing or unknown"
+            ),
+            sources=tuple(sources),
+        )
+    return EvidenceResolution(
+        status="unknown",
+        stars=None,
+        confidence=visual_confidence,
+        conflict=False,
+        reason="no explicit settlement result was verified",
+        sources=tuple(sources),
+    )
 
 
 class BattleResultVerifier:

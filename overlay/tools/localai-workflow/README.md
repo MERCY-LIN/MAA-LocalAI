@@ -61,6 +61,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\localai-workflow\local
 
 # Re-run saved result recognition and callback summarization.
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\localai-workflow\localai.ps1 debug replay
+
+# Check an external corpus of real, human-confirmed screenshots and callbacks.
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\localai-workflow\localai.ps1 debug recognition-check `
+  --corpus "D:\path\to\real-corpus\manifest.json" `
+  --report "D:\path\to\reports\recognition-check.json"
 ```
 
 Evidence is stored under
@@ -87,8 +92,13 @@ impossibility detection and verified safe-exit handling remain `UNVERIFIED`.
 Python workers and the WPF GUI share a named device mutex derived from the ADB
 address. A second controller is rejected before it can send input.
 
-`replay` currently replays settlement recognition and callback summarization.
-Full scheduling replay is not implemented yet.
+`replay` currently replays settlement recognition, callback-derived task state
+transitions, and screenshot/Core evidence reconciliation. Live-device
+scheduling replay is not implemented yet.
+
+`recognition-check` deliberately reads images and manifest files from outside
+the repository. Each case must be marked `source=real_screenshot` and
+`human_confirmed=true`; template-composite samples are rejected.
 
 ## Validation matrix
 

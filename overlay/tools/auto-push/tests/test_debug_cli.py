@@ -16,6 +16,7 @@ from autopush.debug_cli import (
     main,
 )
 from autopush.evidence import EvidenceError
+from autopush.maa_core import CoreMessage, MaaEvent
 from autopush.metrics import RoundMetrics
 from autopush.verifier import ResultVerification
 from autopush.evidence import RunStore
@@ -86,6 +87,9 @@ def test_replay_reuses_saved_result_image(
     assert envelope["data"]["verification"]["status"] == "three_star"
     assert envelope["data"]["callback_summary"]["task_completed"]
     assert envelope["data"]["callback_summary"]["verified"] is False
+    assert envelope["data"]["transition_trace"][0]["phase"] == "RUNNING"
+    assert envelope["data"]["transition_trace"][-1]["phase"] == "VERIFYING"
+    assert envelope["data"]["evidence_resolution"]["status"] == "three_star"
 
 
 def test_default_adb_discovery_has_no_undefined_candidate(monkeypatch):
@@ -206,11 +210,14 @@ def test_run_campaign_uses_deterministic_ranking_and_stops_on_success(
     (jobs_root / "act55side_ex06").mkdir(parents=True)
     candidate = types.SimpleNamespace(
         strategy=types.SimpleNamespace(
-            strategy_id=str(jobs_root / "act55side_ex06" / "job.json")
+            strategy_id=str(jobs_root / "act55side_ex06" / "job.json"),
+            raw={},
         ),
         runnable=True,
+        requirements_satisfied=True,
         missing=(),
         diagnostics=(),
+        lineup=(),
     )
 
     monkeypatch.setattr(debug_cli, "load_roster", lambda _path: {})
@@ -224,10 +231,11 @@ def test_run_campaign_uses_deterministic_ranking_and_stops_on_success(
         "rank_strategies",
         lambda *_args, **_kwargs: [candidate],
     )
-    monkeypatch.setattr(
-        debug_cli,
-        "_run_stage",
-        lambda _arguments: (
+    captured_configs = []
+
+    def run_stage(config):
+        captured_configs.append(config)
+        return (
             {
                 "schema_version": "localai.debug/v1",
                 "command": "run-stage",
@@ -238,8 +246,9 @@ def test_run_campaign_uses_deterministic_ranking_and_stops_on_success(
                 "errors": [],
             },
             0,
-        ),
-    )
+        )
+
+    monkeypatch.setattr(debug_cli, "_run_stage", run_stage)
 
     arguments = types.SimpleNamespace(
         command="run-campaign",
@@ -260,6 +269,7 @@ def test_run_campaign_uses_deterministic_ranking_and_stops_on_success(
         roster=str(tmp_path / "OperBoxData.json"),
         operbox_data=None,
         round_name="test-campaign",
+        verify_threshold=0.91,
     )
 
     envelope, exit_code = debug_cli._run_campaign(arguments)
@@ -268,6 +278,72 @@ def test_run_campaign_uses_deterministic_ranking_and_stops_on_success(
     assert envelope["status"] == "OK"
     assert envelope["data"]["stages"][0]["stage"] == "act55side_ex06"
     assert envelope["data"]["stages"][0]["status"] == "SUCCEEDED"
+    assert captured_configs[0].verify_threshold == 0.91
+    assert captured_configs[0].ignore_requirements is False
+
+
+def test_run_campaign_blocks_degraded_requirements_before_formal_battle(
+    tmp_path: Path,
+    monkeypatch,
+):
+    (tmp_path / "adb.exe").write_bytes(b"adb")
+    jobs_root = tmp_path / "jobs"
+    (jobs_root / "act55side_ex06").mkdir(parents=True)
+    candidate = types.SimpleNamespace(
+        strategy=types.SimpleNamespace(
+            strategy_id=str(jobs_root / "act55side_ex06" / "job.json"),
+            raw={},
+        ),
+        status="degraded",
+        requirements_satisfied=False,
+        missing=(),
+        diagnostics=("A: level 1 < 90",),
+        lineup=(),
+    )
+    monkeypatch.setattr(debug_cli, "load_roster", lambda _path: {})
+    monkeypatch.setattr(
+        debug_cli,
+        "rank_strategies",
+        lambda *_args, **_kwargs: [candidate],
+    )
+    run_stage_calls = 0
+
+    def run_stage(_config):
+        nonlocal run_stage_calls
+        run_stage_calls += 1
+        raise AssertionError("formal battle must not start")
+
+    monkeypatch.setattr(debug_cli, "_run_stage", run_stage)
+    arguments = types.SimpleNamespace(
+        command="run-campaign",
+        confirm_formal_battle=True,
+        package_dir=str(tmp_path / "package"),
+        evidence_root=str(tmp_path / "evidence"),
+        dll=None,
+        resource_dir=None,
+        user_dir=None,
+        template_root=None,
+        state_memory_dir=None,
+        adb=str(tmp_path / "adb.exe"),
+        address="emulator-5554",
+        connect_config="General",
+        timeout=600,
+        verify_threshold=0.86,
+        stages=["act55side_ex06"],
+        jobs_root=str(jobs_root),
+        roster=str(tmp_path / "OperBoxData.json"),
+        operbox_data=None,
+        round_name="test-campaign-requirements",
+    )
+
+    envelope, exit_code = debug_cli._run_campaign(arguments)
+
+    assert exit_code == 2
+    assert envelope["status"] == "BLOCKED"
+    assert envelope["data"]["stages"][0]["reason"] == (
+        "no runnable job satisfied hard requirements"
+    )
+    assert run_stage_calls == 0
 
 
 def test_stop_records_unverified_safe_exit_without_adb(
@@ -409,3 +485,213 @@ def test_run_stage_persists_preflight_failure_evidence(
     assert run_id is not None
     assert (evidence_root / run_id / "status.json").is_file()
     assert (evidence_root / run_id / "metrics.json").is_file()
+
+
+def test_run_stage_rejects_a_job_for_another_stage_with_evidence(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+):
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+    (package_dir / "MaaCore.dll").write_bytes(b"not a library")
+    copilot = tmp_path / "job.json"
+    copilot.write_text(
+        json.dumps({"stage_name": "OF-2", "opers": []}),
+        encoding="utf-8",
+    )
+    evidence_root = tmp_path / "evidence"
+    monkeypatch.setattr(debug_cli, "_maa_version", lambda _path: "test")
+    monkeypatch.setattr(debug_cli, "_maa_processes", lambda: [])
+
+    exit_code = main(
+        [
+            "run-stage",
+            "--stage",
+            "OF-1",
+            "--copilot",
+            str(copilot),
+            "--package-dir",
+            str(package_dir),
+            "--evidence-root",
+            str(evidence_root),
+            "--adb",
+            sys.executable,
+            "--confirm-formal-battle",
+        ]
+    )
+    envelope = json.loads(capsys.readouterr().out)
+    run_id = envelope["run_id"]
+
+    assert exit_code == 2
+    assert envelope["status"] == "BLOCKED"
+    assert envelope["data"]["outcome"] == "BLOCKED_STAGE_MISMATCH"
+    assert "requested='OF-1'" in envelope["errors"][0]
+    status = json.loads(
+        (evidence_root / run_id / "status.json").read_text(encoding="utf-8")
+    )
+    assert status["status"] == RunPhase.UNKNOWN.value
+    assert status["outcome"] == "BLOCKED_STAGE_MISMATCH"
+
+
+def test_settlement_is_captured_before_core_returns_and_conflict_is_unknown(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+):
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+    (package_dir / "MaaCore.dll").write_bytes(b"not a library")
+    copilot = tmp_path / "job.json"
+    copilot.write_text(
+        json.dumps({"stage_name": "OF-1", "opers": []}),
+        encoding="utf-8",
+    )
+    timeline: list[str] = []
+
+    class FakeLease:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def acquire(self):
+            return None
+
+        def release(self):
+            return None
+
+    class FakeAdb:
+        def __init__(self, **_kwargs):
+            pass
+
+        def devices(self):
+            return ["emulator-5554"]
+
+    class FakeMemory:
+        @staticmethod
+        def recognize(_image, **_kwargs):
+            return types.SimpleNamespace(
+                name="home",
+                known=True,
+                distance=0.0,
+                confidence=1.0,
+                reference_path=None,
+            )
+
+    class FakeVerifier:
+        def __init__(self, _root, *, threshold):
+            assert threshold == 0.91
+
+        def verify(self, _image, **_kwargs):
+            return ResultVerification(
+                status="two_star",
+                stars=2,
+                confidence=0.97,
+                evidence=(),
+                needs_computer_use=False,
+            )
+
+    def fake_snapshot(store, **_kwargs):
+        path = store.run_dir / "snapshots" / "preflight.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        assert cv2.imwrite(
+            str(path),
+            np.zeros((720, 1280, 3), dtype=np.uint8),
+        )
+        screenshot = {"path": str(path), "sequence": 1}
+        return {"screenshot": screenshot}, [str(path)]
+
+    def fake_capture(**kwargs):
+        timeline.append("settlement-capture")
+        destination = kwargs["destination"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        assert cv2.imwrite(
+            str(destination),
+            np.zeros((720, 1280, 3), dtype=np.uint8),
+        )
+        return {
+            "path": str(destination),
+            "sequence": 2,
+            "captured_at": "now",
+        }
+
+    events = [
+        MaaEvent(
+            CoreMessage.TASK_CHAIN_START,
+            {"taskchain": "Copilot", "taskid": 7},
+        ),
+        MaaEvent(
+            CoreMessage.SUB_TASK_START,
+            {
+                "taskchain": "Copilot",
+                "taskid": 7,
+                "details": {
+                    "task": "Copilot@StageDrops-Stars-3",
+                    "result": {"score": 0.99},
+                },
+            },
+        ),
+        MaaEvent(
+            CoreMessage.TASK_CHAIN_COMPLETED,
+            {"taskchain": "Copilot", "taskid": 7},
+        ),
+    ]
+
+    def fake_run_copilot_file(**kwargs):
+        event_sink = kwargs["event_sink"]
+        for event in events:
+            event_sink(event)
+        timeline.append("core-run-returned")
+        return events
+
+    monkeypatch.setattr(debug_cli, "_maa_version", lambda _path: "test")
+    monkeypatch.setattr(debug_cli, "_maa_processes", lambda: [])
+    monkeypatch.setattr(debug_cli, "DeviceControlLease", FakeLease)
+    monkeypatch.setattr(debug_cli, "AdbClient", FakeAdb)
+    monkeypatch.setattr(debug_cli, "_snapshot_payload", fake_snapshot)
+    monkeypatch.setattr(debug_cli, "_capture_screenshot", fake_capture)
+    monkeypatch.setattr(
+        debug_cli,
+        "VisualStateMemory",
+        types.SimpleNamespace(
+            load=lambda *_args, **_kwargs: FakeMemory()
+        ),
+    )
+    monkeypatch.setattr(debug_cli, "BattleResultVerifier", FakeVerifier)
+    monkeypatch.setattr(debug_cli, "run_copilot_file", fake_run_copilot_file)
+
+    exit_code = main(
+        [
+            "run-stage",
+            "--stage",
+            "OF-1",
+            "--copilot",
+            str(copilot),
+            "--package-dir",
+            str(package_dir),
+            "--evidence-root",
+            str(tmp_path / "evidence"),
+            "--adb",
+            sys.executable,
+            "--verify-threshold",
+            "0.91",
+            "--confirm-formal-battle",
+        ]
+    )
+    envelope = json.loads(capsys.readouterr().out)
+
+    assert timeline == ["settlement-capture", "core-run-returned"]
+    assert exit_code == 2
+    assert envelope["status"] == RunPhase.UNKNOWN.value
+    assert envelope["data"]["verification_status"] == "conflict"
+    assert envelope["data"]["verification_conflict"] is True
+    status = json.loads(
+        (
+            tmp_path
+            / "evidence"
+            / envelope["run_id"]
+            / "status.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert status["status"] == RunPhase.UNKNOWN.value
+    assert status["verification"]["visual_evidence"]["status"] == "two_star"
+    assert status["verification"]["maa_core_evidence"][0]["score"] == 0.99

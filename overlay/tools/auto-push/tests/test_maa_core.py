@@ -225,6 +225,44 @@ def test_maa_stage_drops_three_star_is_recorded_as_core_evidence():
     assert summary["maa_three_star_evidence"][0]["score"] == 0.9985
 
 
+def test_copilot_prefixed_three_star_task_is_recognized():
+    summary = summarize_events(
+        [
+            MaaEvent(
+                CoreMessage.TASK_CHAIN_START,
+                {"taskchain": "Copilot", "taskid": 45},
+            ),
+            MaaEvent(
+                CoreMessage.SUB_TASK_START,
+                {
+                    "taskchain": "Copilot",
+                    "taskid": 45,
+                    "details": {
+                        "task": "Copilot@StageDrops-Stars-3",
+                        "result": {
+                            "score": 0.991,
+                            "rect": [71, 292, 205, 58],
+                            "template": "StageDrops-Stars-3.png",
+                        },
+                    },
+                },
+            ),
+            MaaEvent(
+                CoreMessage.TASK_CHAIN_COMPLETED,
+                {"taskchain": "Copilot", "taskid": 45},
+            ),
+        ]
+    )
+
+    assert summary["maa_three_star"] is True
+    assert summary["maa_three_star_evidence"][0]["task"] == (
+        "StageDrops-Stars-3"
+    )
+    assert summary["maa_three_star_evidence"][0]["source_task"] == (
+        "Copilot@StageDrops-Stars-3"
+    )
+
+
 def test_summary_can_select_one_task_id():
     summary = summarize_events(
         [

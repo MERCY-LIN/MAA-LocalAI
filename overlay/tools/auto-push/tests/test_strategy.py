@@ -6,6 +6,7 @@ from autopush.strategy import (
     OperatorRequirement,
     RosterOperator,
     candidate_has_hard_elite_gap,
+    candidate_has_hard_requirement_gap,
     evaluate_strategy,
     job_is_raid_only,
     job_requires_wartime_press,
@@ -69,6 +70,104 @@ def test_two_missing_operators_are_unavailable():
     result = evaluate_strategy(_strategy("A", "B"), {})
     assert result.status == "unavailable"
     assert not result.runnable
+
+
+def test_level_and_skill_gaps_are_hard_requirement_failures():
+    roster = {
+        "A": RosterOperator("A", elite=2, level=1, skill_level=1),
+    }
+    result = evaluate_strategy(_strategy("A"), roster, allow_support=False)
+
+    assert result.status == "degraded"
+    assert not result.requirements_satisfied
+    assert candidate_has_hard_requirement_gap(result)
+
+
+def test_two_groups_cannot_both_reuse_one_operator():
+    strategy = CopilotStrategy(
+        path=Path("strategy.json"),
+        stage_id="act55side_08",
+        title="test",
+        operator_groups=[
+            [
+                OperatorRequirement(
+                    name="A",
+                    elite=2,
+                    level=60,
+                    skill_level=10,
+                    requirements_declared=True,
+                )
+            ],
+            [
+                OperatorRequirement(
+                    name="A",
+                    elite=2,
+                    level=60,
+                    skill_level=10,
+                    requirements_declared=True,
+                )
+            ],
+        ],
+    )
+    roster = {
+        "A": RosterOperator("A", elite=2, level=90, skill_level=10),
+    }
+
+    result = evaluate_strategy(strategy, roster, allow_support=False)
+
+    assert result.status == "unavailable"
+    assert not result.requirements_satisfied
+    assert any("lineup conflict" in item for item in result.diagnostics)
+
+
+def test_group_assignment_produces_a_unique_concrete_lineup():
+    strategy = CopilotStrategy(
+        path=Path("strategy.json"),
+        stage_id="act55side_08",
+        title="test",
+        operator_groups=[
+            [
+                OperatorRequirement("A", 2, 60, 10, requirements_declared=True),
+                OperatorRequirement("B", 2, 60, 10, requirements_declared=True),
+            ],
+            [
+                OperatorRequirement("A", 2, 60, 10, requirements_declared=True),
+            ],
+        ],
+    )
+    roster = {
+        "A": RosterOperator("A", elite=2, level=90, skill_level=10),
+        "B": RosterOperator("B", elite=2, level=90, skill_level=10),
+    }
+
+    result = evaluate_strategy(strategy, roster, allow_support=False)
+
+    assert result.status == "ready"
+    assert result.requirements_satisfied
+    assert {slot.assigned for slot in result.lineup} == {"A", "B"}
+
+
+def test_substitution_does_not_hide_a_remaining_missing_operator():
+    roster = {
+        "A": RosterOperator("A", elite=2, level=90, skill_level=10),
+        "Alternative": RosterOperator(
+            "Alternative",
+            elite=2,
+            level=90,
+            skill_level=10,
+        ),
+    }
+
+    result = evaluate_strategy(
+        _strategy("A", "B", "C"),
+        roster,
+        substitutions={"B": ["Alternative"]},
+        allow_support=False,
+    )
+
+    assert result.status == "unavailable"
+    assert result.missing == ("C",)
+    assert not result.requirements_satisfied
 
 
 def test_job_prerequisites_and_mode_are_detected():

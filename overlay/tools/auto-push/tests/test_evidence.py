@@ -42,6 +42,29 @@ def test_stop_request_is_attached_to_the_run(tmp_path: Path):
     assert events[-1]["type"] == "stop_requested"
 
 
+def test_step_evidence_has_all_control_fields(tmp_path: Path):
+    store = RunStore(tmp_path, run_id="run-step", attempt_id="attempt-step")
+
+    store.append_step(
+        name="preflight",
+        preconditions={"adb_ready": True},
+        action="capture current page",
+        postconditions={"safe_to_start": True},
+        timeout_seconds=10,
+        evidence={"screenshot": "preflight.png"},
+    )
+
+    events, _ = store.read_events()
+    step = events[-1]
+    assert step["type"] == "step"
+    assert step["data"]["name"] == "preflight"
+    assert step["data"]["preconditions"] == {"adb_ready": True}
+    assert step["data"]["postconditions"] == {"safe_to_start": True}
+    assert step["data"]["timeout_seconds"] == 10
+    assert step["data"]["evidence"] == {"screenshot": "preflight.png"}
+    assert step["data"]["failure"] is None
+
+
 def test_active_run_guard_is_released(tmp_path: Path):
     store = RunStore(tmp_path, run_id="run-active", attempt_id="attempt-active")
     store.update_status("RUNNING")
