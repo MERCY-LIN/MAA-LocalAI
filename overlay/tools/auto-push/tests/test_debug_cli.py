@@ -219,7 +219,6 @@ def test_run_campaign_uses_deterministic_ranking_and_stops_on_success(
         diagnostics=(),
         lineup=(),
     )
-
     monkeypatch.setattr(debug_cli, "load_roster", lambda _path: {})
     monkeypatch.setattr(
         debug_cli,
@@ -270,14 +269,22 @@ def test_run_campaign_uses_deterministic_ranking_and_stops_on_success(
         operbox_data=None,
         round_name="test-campaign",
         verify_threshold=0.91,
+        campaign_id="campaign-success",
+        resume_campaign=False,
+        recovery_evidence=None,
+        max_attempts_per_stage=2,
+        max_total_attempts=3,
+        max_elapsed_seconds=3600,
+        max_sanity=42,
+        sanity_cost=["act55side_ex06=21"],
     )
 
     envelope, exit_code = debug_cli._run_campaign(arguments)
 
     assert exit_code == 0
     assert envelope["status"] == "OK"
-    assert envelope["data"]["stages"][0]["stage"] == "act55side_ex06"
-    assert envelope["data"]["stages"][0]["status"] == "SUCCEEDED"
+    assert envelope["data"]["attempts"][0]["stage"] == "act55side_ex06"
+    assert envelope["data"]["attempts"][0]["status"] == "SUCCEEDED"
     assert captured_configs[0].verify_threshold == 0.91
     assert captured_configs[0].ignore_requirements is False
 
@@ -328,22 +335,247 @@ def test_run_campaign_blocks_degraded_requirements_before_formal_battle(
         address="emulator-5554",
         connect_config="General",
         timeout=600,
-        verify_threshold=0.86,
         stages=["act55side_ex06"],
         jobs_root=str(jobs_root),
         roster=str(tmp_path / "OperBoxData.json"),
         operbox_data=None,
         round_name="test-campaign-requirements",
+        verify_threshold=0.86,
+        campaign_id="campaign-blocked",
+        resume_campaign=False,
+        recovery_evidence=None,
+        max_attempts_per_stage=2,
+        max_total_attempts=3,
+        max_elapsed_seconds=3600,
+        max_sanity=42,
+        sanity_cost=["act55side_ex06=21"],
     )
 
     envelope, exit_code = debug_cli._run_campaign(arguments)
 
     assert exit_code == 2
     assert envelope["status"] == "BLOCKED"
-    assert envelope["data"]["stages"][0]["reason"] == (
-        "no runnable job satisfied hard requirements"
-    )
+    assert "no runnable job" in envelope["errors"][0]
     assert run_stage_calls == 0
+
+
+def test_run_campaign_switches_candidates_until_three_star(
+    tmp_path: Path,
+    monkeypatch,
+):
+    (tmp_path / "adb.exe").write_bytes(b"adb")
+    jobs_root = tmp_path / "jobs"
+    (jobs_root / "OF-1").mkdir(parents=True)
+    candidates = [
+        types.SimpleNamespace(
+            strategy=types.SimpleNamespace(
+                strategy_id=str(tmp_path / f"job-{index}.json"),
+                raw={},
+            ),
+            status="ready",
+            requirements_satisfied=True,
+            missing=(),
+            diagnostics=(),
+            lineup=(),
+        )
+        for index in range(2)
+    ]
+    monkeypatch.setattr(debug_cli, "load_roster", lambda _path: {})
+    monkeypatch.setattr(
+        debug_cli,
+        "rank_strategies",
+        lambda *_args, **_kwargs: candidates,
+    )
+    selected_jobs: list[str] = []
+
+    def run_stage(config):
+        selected_jobs.append(config.copilot)
+        if len(selected_jobs) == 1:
+            return (
+                {
+                    "status": "FAILED",
+                    "run_id": "run-failed",
+                    "attempt_id": "attempt-failed",
+                    "data": {
+                        "outcome": "FAILED",
+                        "formal_battle_started": True,
+                    },
+                    "errors": [],
+                },
+                2,
+            )
+        return (
+            {
+                "status": "SUCCEEDED",
+                "run_id": "run-success",
+                "attempt_id": "attempt-success",
+                "data": {
+                    "outcome": "SUCCEEDED",
+                    "formal_battle_started": True,
+                },
+                "errors": [],
+            },
+            0,
+        )
+
+    monkeypatch.setattr(debug_cli, "_run_stage", run_stage)
+    arguments = types.SimpleNamespace(
+        command="run-campaign",
+        confirm_formal_battle=True,
+        package_dir=str(tmp_path / "package"),
+        evidence_root=str(tmp_path / "evidence"),
+        dll=None,
+        resource_dir=None,
+        user_dir=None,
+        template_root=None,
+        state_memory_dir=None,
+        adb=str(tmp_path / "adb.exe"),
+        address="emulator-5554",
+        connect_config="General",
+        timeout=600,
+        verify_threshold=0.86,
+        stages=["OF-1"],
+        jobs_root=str(jobs_root),
+        roster=str(tmp_path / "OperBoxData.json"),
+        operbox_data=None,
+        round_name="test-campaign-switch",
+        campaign_id="campaign-switch",
+        resume_campaign=False,
+        recovery_evidence=None,
+        max_attempts_per_stage=3,
+        max_total_attempts=4,
+        max_elapsed_seconds=3600,
+        max_sanity=42,
+        sanity_cost=["OF-1=21"],
+    )
+
+    envelope, exit_code = debug_cli._run_campaign(arguments)
+
+    assert exit_code == 0
+    assert selected_jobs == [
+        candidates[0].strategy.strategy_id,
+        candidates[1].strategy.strategy_id,
+    ]
+    assert envelope["data"]["sanity_spent"] == 42
+    assert [item["status"] for item in envelope["data"]["attempts"]] == [
+        "FAILED",
+        "SUCCEEDED",
+    ]
+    state = json.loads(
+        (
+            tmp_path
+            / "evidence"
+            / "_campaigns"
+            / "campaign-switch"
+            / "state.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert state["status"] == "SUCCEEDED"
+
+
+def test_run_campaign_pauses_unknown_and_resumes_from_checkpoint(
+    tmp_path: Path,
+    monkeypatch,
+):
+    (tmp_path / "adb.exe").write_bytes(b"adb")
+    jobs_root = tmp_path / "jobs"
+    (jobs_root / "OF-1").mkdir(parents=True)
+    candidate = types.SimpleNamespace(
+        strategy=types.SimpleNamespace(
+            strategy_id=str(tmp_path / "job.json"),
+            raw={},
+        ),
+        status="ready",
+        requirements_satisfied=True,
+        missing=(),
+        diagnostics=(),
+        lineup=(),
+    )
+    replacement = types.SimpleNamespace(
+        strategy=types.SimpleNamespace(
+            strategy_id=str(tmp_path / "replacement.json"),
+            raw={},
+        ),
+        status="ready",
+        requirements_satisfied=True,
+        missing=(),
+        diagnostics=(),
+        lineup=(),
+    )
+    monkeypatch.setattr(debug_cli, "load_roster", lambda _path: {})
+    monkeypatch.setattr(
+        debug_cli,
+        "rank_strategies",
+        lambda *_args, **_kwargs: [candidate, replacement],
+    )
+    run_count = 0
+
+    def run_stage(_config):
+        nonlocal run_count
+        run_count += 1
+        return (
+            {
+                "status": "UNKNOWN" if run_count == 1 else "SUCCEEDED",
+                "run_id": f"run-{run_count}",
+                "attempt_id": f"attempt-{run_count}",
+                "data": {
+                    "outcome": "UNKNOWN" if run_count == 1 else "SUCCEEDED",
+                    "formal_battle_started": True,
+                },
+                "errors": [],
+            },
+            2 if run_count == 1 else 0,
+        )
+
+    monkeypatch.setattr(debug_cli, "_run_stage", run_stage)
+    arguments = types.SimpleNamespace(
+        command="run-campaign",
+        confirm_formal_battle=True,
+        package_dir=str(tmp_path / "package"),
+        evidence_root=str(tmp_path / "evidence"),
+        dll=None,
+        resource_dir=None,
+        user_dir=None,
+        template_root=None,
+        state_memory_dir=None,
+        adb=str(tmp_path / "adb.exe"),
+        address="emulator-5554",
+        connect_config="General",
+        timeout=600,
+        verify_threshold=0.86,
+        stages=["OF-1"],
+        jobs_root=str(jobs_root),
+        roster=str(tmp_path / "OperBoxData.json"),
+        operbox_data=None,
+        round_name="test-campaign-resume",
+        campaign_id="campaign-resume",
+        resume_campaign=False,
+        recovery_evidence=None,
+        max_attempts_per_stage=3,
+        max_total_attempts=3,
+        max_elapsed_seconds=3600,
+        max_sanity=63,
+        sanity_cost=["OF-1=21"],
+    )
+
+    paused, paused_exit = debug_cli._run_campaign(arguments)
+    blocked_resume, blocked_exit = debug_cli._run_campaign(arguments)
+    assert paused_exit == 2
+    assert paused["status"] == "PAUSED"
+    assert blocked_exit == 2
+    assert blocked_resume["status"] == "PAUSED"
+    assert run_count == 1
+
+    arguments.resume_campaign = True
+    arguments.recovery_evidence = "state-memory/home"
+    resumed, resumed_exit = debug_cli._run_campaign(arguments)
+
+    assert resumed_exit == 0
+    assert resumed["status"] == "OK"
+    assert run_count == 2
+    assert resumed["data"]["campaign"]["recovery_evidence"] == (
+        "state-memory/home"
+    )
 
 
 def test_stop_records_unverified_safe_exit_without_adb(

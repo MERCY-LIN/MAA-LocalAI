@@ -35,6 +35,11 @@ OpenCV result verification, and auditable per-round metrics.
   evidence is recorded. Exact stage/job binding is checked before preflight.
 - Structured step evidence, external real-screenshot corpus checks, and replay
   of saved recognition, callback state transitions, and evidence decisions.
+- Persistent multi-stage campaign queue with candidate switching after explicit
+  non-three-star results, per-stage and total attempt limits, elapsed-time and
+  sanity budgets, and atomic checkpoint recovery.
+- Unknown, conflicting, blocked, or budget-exhausted campaign states pause the
+  queue and require recovery evidence instead of silently starting another run.
 - Numeric MaaCore callback protocol with task-id correlation, explicit terminal
   phases, screenshot sequence/timestamps, and a Python/WPF device mutex.
 - Per-round records for Computer Use operations, screenshots, tool calls,
@@ -56,9 +61,9 @@ OpenCV result verification, and auditable per-round metrics.
 - A human-reviewed real-screenshot corpus has not been supplied or run in this
   checkout, so recognition accuracy against game-version changes remains
   `UNVERIFIED`.
-- Live scheduling replay, automatic post-conflict recovery, candidate switching,
-  whole-campaign persistence, active impossibility detection, and verified safe
-  battle exit remain incomplete.
+- Live scheduling replay, automatic post-conflict recovery, GUI integration with
+  the campaign queue, active impossibility detection, and verified safe battle
+  exit remain incomplete.
 
 ## Safety boundaries
 

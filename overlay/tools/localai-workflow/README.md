@@ -52,6 +52,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\localai-workflow\local
   --copilot "C:\path\to\job.json" `
   --confirm-formal-battle
 
+# Run a persistent multi-stage queue. Sanity costs are mandatory so the queue
+# cannot continue after an unverified resource budget.
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\localai-workflow\localai.ps1 debug run-campaign `
+  --stages act55side_08 act55side_09 `
+  --jobs-root "D:\path\to\jobs" `
+  --roster "D:\path\to\OperBoxData.json" `
+  --sanity-cost act55side_08=21 `
+  --sanity-cost act55side_09=21 `
+  --max-sanity 42 `
+  --max-attempts-per-stage 3 `
+  --max-total-attempts 6 `
+  --confirm-formal-battle
+
 # Read persistent status or incremental callbacks.
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\localai-workflow\localai.ps1 debug status
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\localai-workflow\localai.ps1 debug events --after 0
@@ -82,6 +95,11 @@ reported as `BLOCKED_PREFLIGHT_STATE` without starting the battle.
 Task-chain callbacks are parsed by the numeric MaaCore message IDs and correlated
 by `taskid`. `TaskChainStopped`, disconnects, task errors, unknown results, and
 budget exhaustion have distinct terminal phases and never become success.
+
+`run-campaign` persists to `_campaigns/<campaign_id>/state.json`. Re-run with the
+same `--campaign-id` to resume. A paused campaign additionally requires
+`--resume-campaign --recovery-evidence <id>`. An explicit failed result switches
+to the next eligible candidate; unknown or conflicting evidence pauses the queue.
 
 `stop` requests `AsstStop` through the active runner and preserves a pre-stop
 screenshot. It intentionally reports `STOPPING_UNVERIFIED` or

@@ -41,6 +41,7 @@
 - `autopush/cli.py`：离线规划与 ADB 检查入口。
 - `autopush/evidence.py`：运行 ID、原子状态、增量事件和停止请求。
 - `autopush/execution.py`：单关与连续推图共用的执行配置和开战前校验。
+- `autopush/campaign.py`：连续推图候选、预算、暂停和持久化恢复状态。
 - `autopush/recognition_acceptance.py`：外部真实截图与人工回调语料的验收集。
 - `autopush/debug_cli.py`：状态、快照、正式单关、停止和回放的 JSON 调试入口。
 - `autopush/states.py`：准备、执行、验证、成功、失败、停止、暂停、未知和预算耗尽。
@@ -133,6 +134,15 @@ D:\work\maa-deps\python-autopush\Scripts\python.exe -m autopush.cli run-copilot 
 
 关键步骤、真实截图验收集和全自动验收标准见
 [`OBSERVABILITY.md`](OBSERVABILITY.md)。
+
+连续推图按关卡和候选建立持久化队列。明确二星或战斗失败后自动尝试下一份
+候选；三星后进入下一关。每关尝试数、总尝试数、累计时间、理智成本和总理智
+均有硬预算。状态保存在
+`<evidence-root>/_campaigns/<campaign_id>/state.json`，进程中断后可使用同一
+`campaign_id` 恢复。
+
+未知结算、证据冲突、关卡绑定错误和预算耗尽会暂停或阻塞队列。暂停状态必须
+提供 `--recovery-evidence` 才能继续，不能通过自动重试绕过现场确认。
 
 验证一张结算截图：
 
