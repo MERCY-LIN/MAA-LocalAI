@@ -588,6 +588,92 @@ def test_run_campaign_pauses_unknown_and_resumes_from_checkpoint(
     )
 
 
+def test_run_campaign_continues_across_all_stages(
+    tmp_path: Path,
+    monkeypatch,
+):
+    (tmp_path / "adb.exe").write_bytes(b"adb")
+    jobs_root = tmp_path / "jobs"
+    candidates = {}
+    for stage in ("OF-1", "OF-2"):
+        (jobs_root / stage).mkdir(parents=True)
+        candidates[stage] = types.SimpleNamespace(
+            strategy=types.SimpleNamespace(
+                strategy_id=str(tmp_path / f"{stage}.json"),
+                raw={},
+            ),
+            status="ready",
+            requirements_satisfied=True,
+            missing=(),
+            diagnostics=(),
+            lineup=(),
+        )
+    monkeypatch.setattr(debug_cli, "load_roster", lambda _path: {})
+    monkeypatch.setattr(
+        debug_cli,
+        "rank_strategies",
+        lambda _paths, stage, _roster, **_kwargs: [candidates[stage]],
+    )
+    selected_stages: list[str] = []
+
+    def run_stage(config):
+        selected_stages.append(config.stage)
+        return (
+            {
+                "status": "SUCCEEDED",
+                "run_id": f"run-{config.stage}",
+                "attempt_id": f"attempt-{config.stage}",
+                "data": {
+                    "outcome": "SUCCEEDED",
+                    "formal_battle_started": True,
+                    "verification_status": "three_star",
+                },
+                "errors": [],
+            },
+            0,
+        )
+
+    monkeypatch.setattr(debug_cli, "_run_stage", run_stage)
+    arguments = types.SimpleNamespace(
+        command="run-campaign",
+        confirm_formal_battle=True,
+        package_dir=str(tmp_path / "package"),
+        evidence_root=str(tmp_path / "evidence"),
+        dll=None,
+        resource_dir=None,
+        user_dir=None,
+        template_root=None,
+        state_memory_dir=None,
+        adb=str(tmp_path / "adb.exe"),
+        address="emulator-5554",
+        connect_config="General",
+        timeout=600,
+        verify_threshold=0.86,
+        stages=["OF-1", "OF-2"],
+        jobs_root=str(jobs_root),
+        roster=str(tmp_path / "OperBoxData.json"),
+        operbox_data=None,
+        round_name="test-campaign-stages",
+        campaign_id="campaign-stages",
+        resume_campaign=False,
+        recovery_evidence=None,
+        max_attempts_per_stage=2,
+        max_total_attempts=4,
+        max_elapsed_seconds=3600,
+        max_sanity=42,
+        sanity_cost=["OF-1=21", "OF-2=21"],
+    )
+
+    envelope, exit_code = debug_cli._run_campaign(arguments)
+
+    assert exit_code == 0
+    assert envelope["run_id"] == "campaign-stages"
+    assert selected_stages == ["OF-1", "OF-2"]
+    assert envelope["data"]["campaign"]["stage_index"] == 2
+    assert envelope["data"]["campaign"]["status"] == "SUCCEEDED"
+    assert envelope["data"]["sanity_spent"] == 42
+
+
 def test_campaign_status_reads_persisted_queue(
     tmp_path: Path,
     capsys,
@@ -614,6 +700,7 @@ def test_campaign_status_reads_persisted_queue(
     envelope = json.loads(capsys.readouterr().out)
 
     assert exit_code == 0
+    assert envelope["run_id"] == "campaign-status"
     assert envelope["status"] == "ACTIVE"
     assert envelope["data"]["campaign"]["stages"] == ["OF-1"]
     assert Path(envelope["artifacts"][0]).is_file()

@@ -1628,6 +1628,7 @@ def _campaign_status(
         result_envelope(
             "campaign-status",
             state.status,
+            run_id=state.campaign_id,
             data={
                 "campaign": state.to_dict(),
                 "current_stage": state.current_stage,
@@ -1913,6 +1914,7 @@ def _campaign_envelope(
         result_envelope(
             "run-campaign",
             status,
+            run_id=state.campaign_id,
             data={
                 "campaign": state.to_dict(),
                 "current_stage": state.current_stage,
