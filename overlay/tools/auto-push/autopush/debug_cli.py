@@ -100,6 +100,14 @@ SAFE_PREFLIGHT_STATES = {
     "settings",
     "terminal_protocol",
 }
+SAFE_POST_STOP_STATES = {
+    "agreement",
+    "credit_shop",
+    "event_map",
+    "home",
+    "settings",
+    "terminal_protocol",
+}
 TARGET_STAGE_DETAIL_PREFIX = "stage_detail_"
 
 
@@ -108,6 +116,13 @@ def _is_safe_preflight_state(state_name: str, stage: str) -> bool:
 
     return (
         state_name in SAFE_PREFLIGHT_STATES
+        or state_name == f"{TARGET_STAGE_DETAIL_PREFIX}{stage}"
+    )
+
+
+def _is_safe_post_stop_state(state_name: str, stage: str) -> bool:
+    return (
+        state_name in SAFE_POST_STOP_STATES
         or state_name == f"{TARGET_STAGE_DETAIL_PREFIX}{stage}"
     )
 
@@ -1229,6 +1244,81 @@ def _run_stage(
                 ]
             )
         stop_requested = store.stop_requested()
+        safe_exit_verified = False
+        post_stop_payload: dict[str, Any] | None = None
+        if stop_requested or summary["terminal_state"] == "STOPPED":
+            try:
+                post_stop_payload, post_stop_artifacts = _snapshot_payload(
+                    store,
+                    package_dir=package_dir,
+                    dll_path=dll_path,
+                    adb_path=adb_path,
+                    address=arguments.address,
+                    copilot_path=copilot_path,
+                    label="after-stop",
+                    metrics=metrics,
+                )
+                artifacts.extend(post_stop_artifacts)
+                post_stop_image = _snapshot_image(post_stop_payload)
+                decoded_post_stop = cv2.imread(
+                    post_stop_image["path"],
+                    cv2.IMREAD_COLOR,
+                )
+                if decoded_post_stop is None:
+                    raise ValueError("unable to decode post-stop screenshot")
+                post_stop_state = memory.recognize(
+                    decoded_post_stop,
+                    metrics=metrics,
+                )
+                safe_exit_verified = (
+                    post_stop_state.known
+                    and _is_safe_post_stop_state(
+                        post_stop_state.name,
+                        arguments.stage,
+                    )
+                )
+                post_stop_payload["state"] = {
+                    "name": post_stop_state.name,
+                    "known": post_stop_state.known,
+                    "distance": post_stop_state.distance,
+                    "confidence": post_stop_state.confidence,
+                    "safe_exit_verified": safe_exit_verified,
+                }
+                store.append_step(
+                    name="post-stop-safe-exit",
+                    preconditions={
+                        "stop_requested": stop_requested,
+                        "core_terminal_state": summary["terminal_state"],
+                    },
+                    action="capture and recognize the page after Core stops",
+                    postconditions={
+                        "state": post_stop_state.name,
+                        "safe_exit_verified": safe_exit_verified,
+                    },
+                    timeout_seconds=10,
+                    evidence=post_stop_payload,
+                    failure=(
+                        None
+                        if safe_exit_verified
+                        else "post-stop page is not in the safe state set"
+                    ),
+                )
+            except (AdbError, OSError, ValueError) as exception:
+                store.append_step(
+                    name="post-stop-safe-exit",
+                    preconditions={
+                        "stop_requested": stop_requested,
+                        "core_terminal_state": summary["terminal_state"],
+                    },
+                    action="capture and recognize the page after Core stops",
+                    postconditions={
+                        "state": "unknown",
+                        "safe_exit_verified": False,
+                    },
+                    timeout_seconds=10,
+                    evidence={},
+                    failure=str(exception),
+                )
         can_verify = (
             not stop_requested
             and summary["terminal_state"] == "COMPLETED"
@@ -1392,7 +1482,8 @@ def _run_stage(
             "stop_requested": stop_requested,
             "stop_request": store.read_stop_request(),
             "preflight_state": preflight_payload,
-            "safe_exit_verified": False,
+            "post_stop_state": post_stop_payload,
+            "safe_exit_verified": safe_exit_verified,
             "resource_policy": {
                 "sanity_potions": 0,
                 "originite_prime": 0,
@@ -1413,7 +1504,8 @@ def _run_stage(
                 if result_path.is_file()
                 else None
             ),
-            safe_exit_verified=False,
+            safe_exit_verified=safe_exit_verified,
+            post_stop_state=post_stop_payload,
         )
         store.append_event("run_finished", data)
         exit_code = 0 if outcome is RunPhase.SUCCEEDED else 2
@@ -1521,6 +1613,28 @@ def _events(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 "returned": len(events),
             },
             artifacts=[str(store.events_path)] if store.events_path.is_file() else [],
+        ),
+        0,
+    )
+
+
+def _campaign_status(
+    arguments: argparse.Namespace,
+) -> tuple[dict[str, Any], int]:
+    evidence_root = _resolve(arguments.evidence_root, _default_evidence_root())
+    store = CampaignStore(evidence_root, arguments.campaign_id)
+    state = store.load()
+    return (
+        result_envelope(
+            "campaign-status",
+            state.status,
+            data={
+                "campaign": state.to_dict(),
+                "current_stage": state.current_stage,
+                "attempts": [asdict(item) for item in state.attempts],
+                "sanity_spent": state.sanity_spent,
+            },
+            artifacts=[str(store.state_path)],
         ),
         0,
     )
@@ -1989,6 +2103,16 @@ def _run_campaign(
         raise EvidenceError(f"jobs root is not a directory: {jobs_root}")
 
     stages = list(arguments.stages)
+    missing_job_dirs = [
+        str(jobs_root / stage)
+        for stage in stages
+        if not (jobs_root / stage).is_dir()
+    ]
+    if missing_job_dirs:
+        raise EvidenceError(
+            "campaign job directories are missing: "
+            + ", ".join(missing_job_dirs)
+        )
     policy = _campaign_policy(arguments)
     policy.validate(stages)
     campaign_id = str(
@@ -2122,6 +2246,18 @@ def _run_campaign(
                 errors=[state.pause_reason],
             )
         candidate_index = state.next_candidate_index.get(stage, 0)
+        attempted_jobs = {
+            attempt.job
+            for attempt in state.attempts
+            if attempt.stage == stage
+        }
+        while (
+            candidate_index < len(eligible)
+            and str(eligible[candidate_index].strategy.strategy_id)
+            in attempted_jobs
+        ):
+            candidate_index += 1
+        state.next_candidate_index[stage] = candidate_index
         if candidate_index >= len(eligible):
             state.status = "BUDGET_EXHAUSTED"
             state.pause_reason = f"all eligible jobs exhausted: {stage}"
@@ -2187,7 +2323,12 @@ def _run_campaign(
             state.next_candidate_index[stage] = 0
             store.save(state)
             continue
-        if envelope.get("status") == "FAILED" and battle_started:
+        if (
+            envelope.get("status") == "FAILED"
+            and battle_started
+            and data.get("verification_status")
+            in {"two_star", "non_three_star"}
+        ):
             continue
         state.pause(
             "campaign paused after "
@@ -2337,6 +2478,17 @@ def build_parser() -> argparse.ArgumentParser:
     events.add_argument("--after", type=int, default=0)
     events.add_argument("--limit", type=int, default=1000)
     events.set_defaults(handler=_events)
+
+    campaign_status = subparsers.add_parser(
+        "campaign-status",
+        help="read one persisted campaign queue",
+    )
+    campaign_status.add_argument(
+        "--evidence-root",
+        default=str(_default_evidence_root()),
+    )
+    campaign_status.add_argument("--campaign-id", required=True)
+    campaign_status.set_defaults(handler=_campaign_status)
 
     stop = subparsers.add_parser(
         "stop",

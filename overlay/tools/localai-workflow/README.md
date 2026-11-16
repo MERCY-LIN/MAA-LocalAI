@@ -101,11 +101,19 @@ same `--campaign-id` to resume. A paused campaign additionally requires
 `--resume-campaign --recovery-evidence <id>`. An explicit failed result switches
 to the next eligible candidate; unknown or conflicting evidence pauses the queue.
 
+Read the queue checkpoint without controlling the device:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\localai-workflow\localai.ps1 debug campaign-status `
+  --campaign-id "campaign-20261117T000500-abcd1234"
+```
+
 `stop` requests `AsstStop` through the active runner and preserves a pre-stop
-screenshot. It intentionally reports `STOPPING_UNVERIFIED` or
-`STOPPED_UNVERIFIED`: requesting a
-stop does not prove that the battle was safely exited. Active three-star
-impossibility detection and verified safe-exit handling remain `UNVERIFIED`.
+screenshot. The stop command itself intentionally reports
+`STOPPING_UNVERIFIED` or `STOPPED_UNVERIFIED`. After Core ends the session, the
+runner captures the post-stop page and sets `safe_exit_verified=true` only when
+the visual state is a known safe page. Active three-star impossibility detection
+and intervention before settlement remain `UNVERIFIED`.
 
 Python workers and the WPF GUI share a named device mutex derived from the ADB
 address. A second controller is rejected before it can send input.

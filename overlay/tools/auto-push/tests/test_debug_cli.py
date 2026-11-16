@@ -8,10 +8,12 @@ import numpy as np
 
 import autopush.debug_cli as debug_cli
 from autopush.adb import AdbError
+from autopush.campaign import CampaignPolicy, CampaignStore
 from autopush.debug_cli import (
     _default_adb,
     _capture_verified_result,
     _is_safe_preflight_state,
+    _is_safe_post_stop_state,
     _snapshot_image,
     main,
 )
@@ -109,6 +111,13 @@ def test_preflight_accepts_only_exact_target_stage_detail():
         "act55side_ex05",
     )
     assert not _is_safe_preflight_state("unknown", "act55side_ex05")
+
+
+def test_post_stop_accepts_only_known_safe_pages():
+    assert _is_safe_post_stop_state("home", "OF-1")
+    assert _is_safe_post_stop_state("stage_detail_OF-1", "OF-1")
+    assert not _is_safe_post_stop_state("stage_detail_OF-2", "OF-1")
+    assert not _is_safe_post_stop_state("unknown", "OF-1")
 
 
 def test_snapshot_image_reads_nested_preflight_metadata():
@@ -399,6 +408,7 @@ def test_run_campaign_switches_candidates_until_three_star(
                     "data": {
                         "outcome": "FAILED",
                         "formal_battle_started": True,
+                        "verification_status": "non_three_star",
                     },
                     "errors": [],
                 },
@@ -576,6 +586,37 @@ def test_run_campaign_pauses_unknown_and_resumes_from_checkpoint(
     assert resumed["data"]["campaign"]["recovery_evidence"] == (
         "state-memory/home"
     )
+
+
+def test_campaign_status_reads_persisted_queue(
+    tmp_path: Path,
+    capsys,
+):
+    evidence_root = tmp_path / "evidence"
+    store = CampaignStore(evidence_root, "campaign-status")
+    store.create(
+        stages=["OF-1"],
+        policy=CampaignPolicy(
+            sanity_costs={"OF-1": 21},
+            max_sanity=42,
+        ),
+    )
+
+    exit_code = main(
+        [
+            "campaign-status",
+            "--evidence-root",
+            str(evidence_root),
+            "--campaign-id",
+            "campaign-status",
+        ]
+    )
+    envelope = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert envelope["status"] == "ACTIVE"
+    assert envelope["data"]["campaign"]["stages"] == ["OF-1"]
+    assert Path(envelope["artifacts"][0]).is_file()
 
 
 def test_stop_records_unverified_safe_exit_without_adb(

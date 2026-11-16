@@ -40,6 +40,8 @@ OpenCV result verification, and auditable per-round metrics.
   sanity budgets, and atomic checkpoint recovery.
 - Unknown, conflicting, blocked, or budget-exhausted campaign states pause the
   queue and require recovery evidence instead of silently starting another run.
+- Post-stop safe-exit verification now captures and recognizes the page after
+  Core ends the session; only known safe states set `safe_exit_verified=true`.
 - Numeric MaaCore callback protocol with task-id correlation, explicit terminal
   phases, screenshot sequence/timestamps, and a Python/WPF device mutex.
 - Per-round records for Computer Use operations, screenshots, tool calls,
@@ -62,8 +64,9 @@ OpenCV result verification, and auditable per-round metrics.
   checkout, so recognition accuracy against game-version changes remains
   `UNVERIFIED`.
 - Live scheduling replay, automatic post-conflict recovery, GUI integration with
-  the campaign queue, active impossibility detection, and verified safe battle
-  exit remain incomplete.
+  the campaign queue, and active three-star impossibility detection remain
+  incomplete. Safe exit is verified for observed post-stop pages but has not
+  been proven in a real interrupted battle.
 
 ## Safety boundaries
 
