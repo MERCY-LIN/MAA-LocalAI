@@ -71,6 +71,28 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\localai-workflow\local
 
 回放不会伪造设备状态，也不会重新发送点击。需要观察真实页面跳转、停止和恢复时，仍要在隔离设备做一次实机复测。
 
+## 持久化队列
+
+连续推图以 `campaign_id` 为根标识，状态保存在
+`<evidence-root>/_campaigns/<campaign_id>/state.json`，事件保存在同目录的
+`events.jsonl`。状态写入使用原子替换，事件只追加。
+
+队列只在明确的二星或非三星正式结果后切换下一候选。三星后进入下一关，直到
+所有关卡完成。任务错误、断连、未知结果、证据冲突、关卡绑定错误、尝试次数、
+时间和理智预算任一不满足时，队列暂停或阻塞并保存检查点。
+
+恢复暂停队列必须提供新的恢复证据：
+
+```powershell
+... debug run-campaign `
+  --campaign-id "campaign-id" `
+  --resume-campaign `
+  --recovery-evidence "state-memory/home" `
+  ...
+```
+
+`campaign-status` 可只读查看当前关卡、尝试、预算和队列状态，不会控制 ADB 或游戏。
+
 ## 全自动验收
 
 `全自动已实现` 必须同时满足：

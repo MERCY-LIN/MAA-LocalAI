@@ -45,6 +45,8 @@ class CampaignPolicy:
     def validate(self, stages: list[str]) -> None:
         if not stages:
             raise CampaignError("campaign requires at least one stage")
+        if len(stages) > 5:
+            raise CampaignError("campaign supports at most five stages")
         if len(set(stages)) != len(stages):
             raise CampaignError("campaign stages must be unique")
         if self.max_attempts_per_stage < 1:
@@ -234,6 +236,13 @@ class CampaignStore:
             raise CampaignError("campaign candidate index must be non-negative")
         if len(state.attempts) > state.policy.max_total_attempts:
             raise CampaignError("campaign attempt count exceeds policy")
+        try:
+            datetime.fromisoformat(state.started_at)
+            datetime.fromisoformat(state.updated_at)
+        except ValueError as exception:
+            raise CampaignError(
+                "campaign timestamps are invalid"
+            ) from exception
         return state
 
     def save(self, state: CampaignState) -> None:

@@ -26,6 +26,17 @@ def test_campaign_policy_requires_a_total_sanity_limit():
         policy.validate(["OF-1"])
 
 
+def test_campaign_policy_rejects_more_than_five_stages():
+    stages = [f"OF-{index}" for index in range(1, 7)]
+    policy = CampaignPolicy(
+        sanity_costs={stage: 21 for stage in stages},
+        max_sanity=126,
+    )
+
+    with pytest.raises(CampaignError, match="five stages"):
+        policy.validate(stages)
+
+
 def test_campaign_state_persists_attempts_and_recovery_gate(tmp_path: Path):
     policy = CampaignPolicy(
         sanity_costs={"OF-1": 21},
