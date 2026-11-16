@@ -139,7 +139,8 @@ D:\work\maa-deps\python-autopush\Scripts\python.exe -m autopush.cli run-copilot 
 候选；三星后进入下一关。每关尝试数、总尝试数、累计时间、理智成本和总理智
 均有硬预算。状态保存在
 `<evidence-root>/_campaigns/<campaign_id>/state.json`，进程中断后可使用同一
-`campaign_id` 恢复。
+`campaign_id` 恢复。同一目录下的 `events.jsonl` 记录候选选择、尝试结果、暂停
+和恢复，状态文件使用原子替换。
 
 未知结算、证据冲突、关卡绑定错误和预算耗尽会暂停或阻塞队列。暂停状态必须
 提供 `--recovery-evidence` 才能继续，不能通过自动重试绕过现场确认。

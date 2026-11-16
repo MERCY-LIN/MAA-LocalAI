@@ -1634,7 +1634,11 @@ def _campaign_status(
                 "attempts": [asdict(item) for item in state.attempts],
                 "sanity_spent": state.sanity_spent,
             },
-            artifacts=[str(store.state_path)],
+            artifacts=[
+                str(path)
+                for path in (store.state_path, store.events_path)
+                if path.is_file()
+            ],
         ),
         0,
     )
@@ -1895,6 +1899,8 @@ def _campaign_envelope(
     errors: list[str] | None = None,
 ) -> tuple[dict[str, Any], int]:
     artifacts = [str(store.state_path)]
+    if store.events_path.is_file():
+        artifacts.append(str(store.events_path))
     artifacts.extend(
         str(store.evidence_root / str(attempt.run_id) / "manifest.json")
         for attempt in state.attempts
@@ -1925,147 +1931,6 @@ def _campaign_envelope(
             artifacts=artifacts,
         ),
         0 if status == "OK" else 2,
-    )
-
-
-def _run_campaign_legacy(
-    arguments: argparse.Namespace,
-) -> tuple[dict[str, Any], int]:
-    """Run several formal clears deterministically, stopping on first failure."""
-
-    if not arguments.confirm_formal_battle:
-        raise EvidenceError(
-            "run-campaign requires --confirm-formal-battle after reviewing "
-            "the stage list and job root"
-        )
-    package_dir = _resolve(arguments.package_dir, _default_package_dir())
-    evidence_root = _resolve(arguments.evidence_root, _default_evidence_root())
-    dll_path = _resolve(arguments.dll, package_dir / "MaaCore.dll")
-    resource_dir = _resolve(arguments.resource_dir, package_dir / "resource")
-    user_dir = _resolve(arguments.user_dir, package_dir)
-    template_root = _resolve(
-        arguments.template_root,
-        package_dir / "resource" / "template" / "Battle",
-    )
-    state_memory_dir = _resolve(
-        arguments.state_memory_dir,
-        package_dir / "data" / "autopush" / "state-memory",
-    )
-    adb_path = _resolve(arguments.adb, Path(arguments.adb)) if arguments.adb else (
-        _default_adb()
-    )
-    if adb_path is None or not adb_path.is_file():
-        raise EvidenceError("ADB executable was not found")
-    roster = load_roster(arguments.roster)
-    jobs_root = Path(arguments.jobs_root).expanduser().resolve()
-    if not jobs_root.is_dir():
-        raise EvidenceError(f"jobs root is not a directory: {jobs_root}")
-
-    stage_results: list[dict[str, Any]] = []
-    for stage in arguments.stages:
-        jobs_dir = jobs_root / stage
-        if not jobs_dir.is_dir():
-            raise EvidenceError(f"no job directory for stage: {jobs_dir}")
-        metrics = RoundMetrics(
-            round_name=arguments.round_name,
-            stage=stage,
-            limits=BudgetLimits(
-                screenshots=16,
-                tool_calls=240,
-                strategy_runs=1,
-            ),
-        )
-        candidates = rank_strategies(
-            collect_strategy_files([jobs_dir]),
-            stage,
-            roster,
-            allow_support=False,
-            metrics=metrics,
-        )
-        eligible = [
-            candidate
-            for candidate in candidates
-            if candidate.requirements_satisfied
-            and not candidate_has_hard_requirement_gap(candidate)
-            and (
-                not isinstance(getattr(candidate.strategy, "raw", None), dict)
-                or not job_is_raid_only(candidate.strategy.raw)
-            )
-        ]
-        if not eligible:
-            stage_results.append(
-                {
-                    "stage": stage,
-                    "status": "BLOCKED",
-                    "reason": "no runnable job satisfied hard requirements",
-                }
-            )
-            break
-        selected = eligible[0]
-        stage_config = StageExecutionConfig(
-            stage=stage,
-            copilot=str(selected.strategy.strategy_id),
-            package_dir=str(package_dir),
-            evidence_root=str(evidence_root),
-            dll=str(dll_path),
-            resource_dir=str(resource_dir),
-            user_dir=str(user_dir),
-            template_root=str(template_root),
-            state_memory_dir=str(state_memory_dir),
-            adb=str(adb_path),
-            address=arguments.address,
-            connect_config=arguments.connect_config,
-            timeout=arguments.timeout,
-            verify_threshold=float(
-                getattr(
-                    arguments,
-                    "verify_threshold",
-                    DEFAULT_VERIFY_THRESHOLD,
-                )
-            ),
-            formation=True,
-            formation_index=0,
-            add_trust=False,
-            ignore_requirements=False,
-            operbox_data=str(arguments.operbox_data or arguments.roster),
-            support_unit_usage=0,
-            confirm_formal_battle=True,
-        )
-        stage_config.validate()
-        envelope, exit_code = _run_stage(stage_config)
-        stage_results.append(
-            {
-                "stage": stage,
-                "job": str(selected.strategy.strategy_id),
-                "lineup": [asdict(slot) for slot in selected.lineup],
-                "requirements_satisfied": selected.requirements_satisfied,
-                "run_id": envelope.get("run_id"),
-                "attempt_id": envelope.get("attempt_id"),
-                "status": envelope.get("status"),
-                "outcome": envelope.get("data", {}).get("outcome"),
-                "errors": envelope.get("errors", []),
-            }
-        )
-        if exit_code != 0:
-            break
-
-    succeeded = bool(stage_results) and all(
-        item.get("status") == "SUCCEEDED" for item in stage_results
-    )
-    return (
-        result_envelope(
-            "run-campaign",
-            "OK" if succeeded else "BLOCKED",
-            data={
-                "stages": stage_results,
-                "policy": {
-                    "sanity_potions": 0,
-                    "originite_prime": 0,
-                    "max_attempts_per_stage": 1,
-                },
-            },
-        ),
-        0 if succeeded else 2,
     )
 
 
@@ -2143,6 +2008,10 @@ def _run_campaign(
                     errors=[state.pause_reason or "campaign is paused"],
                 )
             state.resume(str(getattr(arguments, "recovery_evidence", "") or ""))
+            store.append_event(
+                "campaign_resumed",
+                {"recovery_evidence": state.recovery_evidence},
+            )
         elif not getattr(arguments, "resume_campaign", False):
             raise CampaignError(
                 "existing active campaign requires --resume-campaign"
@@ -2150,6 +2019,13 @@ def _run_campaign(
         store.save(state)
     else:
         state = store.create(stages=stages, policy=policy)
+        store.append_event(
+            "campaign_started",
+            {
+                "stages": stages,
+                "policy": asdict(policy),
+            },
+        )
 
     while state.stage_index < len(state.stages):
         stage = state.stages[state.stage_index]
@@ -2239,6 +2115,10 @@ def _run_campaign(
                 f"no runnable job satisfied hard requirements: {stage}"
             )
             store.save(state)
+            store.append_event(
+                "campaign_blocked",
+                {"stage": stage, "reason": state.pause_reason},
+            )
             return _campaign_envelope(
                 state,
                 store,
@@ -2301,7 +2181,33 @@ def _run_campaign(
         stage_config.validate()
         state.next_candidate_index[stage] = candidate_index + 1
         store.save(state)
-        envelope, _ = _run_stage(stage_config)
+        store.append_event(
+            "candidate_selected",
+            {
+                "stage": stage,
+                "candidate_index": candidate_index,
+                "job": str(selected.strategy.strategy_id),
+                "lineup": [asdict(slot) for slot in selected.lineup],
+            },
+        )
+        try:
+            envelope, _ = _run_stage(stage_config)
+        except Exception as exception:
+            state.pause(
+                f"campaign paused after unhandled runner error at stage="
+                f"{stage}: {type(exception).__name__}: {exception}"
+            )
+            store.save(state)
+            store.append_event(
+                "campaign_paused",
+                {"stage": stage, "reason": state.pause_reason},
+            )
+            return _campaign_envelope(
+                state,
+                store,
+                status="PAUSED",
+                errors=[state.pause_reason],
+            )
         data = envelope.get("data") or {}
         battle_started = bool(data.get("formal_battle_started"))
         store.record_attempt(
@@ -2318,7 +2224,15 @@ def _run_campaign(
                 finished_at=utc_now(),
             ),
         )
+        store.append_event(
+            "attempt_finished",
+            asdict(state.attempts[-1]),
+        )
         if envelope.get("status") == "SUCCEEDED":
+            store.append_event(
+                "stage_succeeded",
+                {"stage": stage, "job": state.attempts[-1].job},
+            )
             state.stage_index += 1
             state.next_candidate_index[stage] = 0
             store.save(state)
@@ -2336,6 +2250,10 @@ def _run_campaign(
             f"outcome={data.get('outcome')}"
         )
         store.save(state)
+        store.append_event(
+            "campaign_paused",
+            {"stage": stage, "reason": state.pause_reason},
+        )
         return _campaign_envelope(
             state,
             store,
@@ -2346,6 +2264,7 @@ def _run_campaign(
     state.status = "SUCCEEDED"
     state.pause_reason = None
     store.save(state)
+    store.append_event("campaign_succeeded", {"stages": state.stages})
     return _campaign_envelope(state, store, status="OK")
 
 

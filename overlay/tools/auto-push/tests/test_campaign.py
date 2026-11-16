@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import pytest
 
@@ -59,6 +60,12 @@ def test_campaign_state_persists_attempts_and_recovery_gate(tmp_path: Path):
     loaded.resume("recovery-snapshot.json")
     assert loaded.status == "ACTIVE"
     assert loaded.recovery_evidence == "recovery-snapshot.json"
+    store.append_event("test-event", {"ok": True})
+    events = [
+        json.loads(line)
+        for line in store.events_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert events[-1]["type"] == "test-event"
 
 
 def test_parse_sanity_costs_is_strict():

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+import threading
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -182,6 +185,8 @@ class CampaignStore:
         self.campaign_id = validate_identifier(campaign_id, "campaign_id")
         self.root = self.evidence_root / "_campaigns" / self.campaign_id
         self.state_path = self.root / "state.json"
+        self.events_path = self.root / "events.jsonl"
+        self._event_lock = threading.Lock()
 
     @staticmethod
     def new_id() -> str:
@@ -223,6 +228,26 @@ class CampaignStore:
     def record_attempt(self, state: CampaignState, attempt: CampaignAttempt) -> None:
         state.record_attempt(attempt)
         self.save(state)
+
+    def append_event(
+        self,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        event = {
+            "schema_version": CAMPAIGN_SCHEMA,
+            "campaign_id": self.campaign_id,
+            "timestamp": utc_now(),
+            "type": event_type,
+            "data": payload,
+        }
+        line = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+        self.root.mkdir(parents=True, exist_ok=True)
+        with self._event_lock:
+            with self.events_path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(line + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
 
 
 def parse_sanity_costs(values: list[str] | None) -> dict[str, int]:
