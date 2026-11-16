@@ -75,3 +75,20 @@ def test_parse_sanity_costs_is_strict():
     }
     with pytest.raises(CampaignError, match="invalid sanity cost"):
         parse_sanity_costs(["OF-1"])
+
+
+def test_campaign_store_rejects_corrupt_resume_position(tmp_path: Path):
+    store = CampaignStore(tmp_path, "campaign-corrupt")
+    store.create(
+        stages=["OF-1"],
+        policy=CampaignPolicy(
+            sanity_costs={"OF-1": 21},
+            max_sanity=42,
+        ),
+    )
+    payload = json.loads(store.state_path.read_text(encoding="utf-8"))
+    payload["stage_index"] = 2
+    store.state_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(CampaignError, match="stage index"):
+        store.load()

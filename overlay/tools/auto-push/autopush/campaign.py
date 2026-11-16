@@ -21,6 +21,13 @@ from .evidence import (
 
 
 CAMPAIGN_SCHEMA = "localai.campaign/v1"
+CAMPAIGN_STATUSES = {
+    "ACTIVE",
+    "PAUSED",
+    "BLOCKED",
+    "BUDGET_EXHAUSTED",
+    "SUCCEEDED",
+}
 
 
 class CampaignError(ValueError):
@@ -217,6 +224,16 @@ class CampaignStore:
         if state.campaign_id != self.campaign_id:
             raise CampaignError("campaign id does not match state file")
         state.policy.validate(state.stages)
+        if state.status not in CAMPAIGN_STATUSES:
+            raise CampaignError(f"unknown campaign status: {state.status}")
+        if state.stage_index < 0 or state.stage_index > len(state.stages):
+            raise CampaignError("campaign stage index is out of range")
+        if state.sanity_spent < 0:
+            raise CampaignError("campaign sanity spent must be non-negative")
+        if any(index < 0 for index in state.next_candidate_index.values()):
+            raise CampaignError("campaign candidate index must be non-negative")
+        if len(state.attempts) > state.policy.max_total_attempts:
+            raise CampaignError("campaign attempt count exceeds policy")
         return state
 
     def save(self, state: CampaignState) -> None:
