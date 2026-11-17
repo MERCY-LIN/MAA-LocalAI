@@ -731,9 +731,12 @@ def test_run_campaign_switches_candidates_until_three_star(
     selected_jobs: list[str] = []
     recovery_calls = 0
 
-    def recover_surface(**_kwargs):
+    def recover_surface(**kwargs):
         nonlocal recovery_calls
         recovery_calls += 1
+        assert kwargs["task_names"] == [
+            "Copilot@ClickCornerUntilStartButton"
+        ]
         return [
             MaaEvent(
                 CoreMessage.TASK_CHAIN_START,
@@ -831,6 +834,109 @@ def test_run_campaign_switches_candidates_until_three_star(
         ).read_text(encoding="utf-8")
     )
     assert state["status"] == "SUCCEEDED"
+
+
+def test_campaign_pauses_when_non_three_settlement_cannot_be_left(
+    tmp_path: Path,
+    monkeypatch,
+):
+    (tmp_path / "adb.exe").write_bytes(b"adb")
+    jobs_root = tmp_path / "jobs"
+    (jobs_root / "OF-1").mkdir(parents=True)
+    candidates = [
+        types.SimpleNamespace(
+            strategy=types.SimpleNamespace(
+                strategy_id=str(tmp_path / f"job-{index}.json"),
+                raw={},
+            ),
+            status="ready",
+            requirements_satisfied=True,
+            missing=(),
+            diagnostics=(),
+            lineup=(),
+        )
+        for index in range(2)
+    ]
+    monkeypatch.setattr(debug_cli, "load_roster", lambda _path: {})
+    monkeypatch.setattr(
+        debug_cli,
+        "rank_strategies",
+        lambda *_args, **_kwargs: candidates,
+    )
+    selected_jobs = []
+
+    def run_stage(config):
+        selected_jobs.append(config.copilot)
+        return (
+            {
+                "status": "FAILED",
+                "run_id": "run-failed",
+                "attempt_id": "attempt-failed",
+                "data": {
+                    "outcome": "FAILED",
+                    "formal_battle_started": True,
+                    "verification_status": "non_three_star",
+                },
+                "errors": [],
+            },
+            2,
+        )
+
+    def fail_recovery(**_kwargs):
+        return [
+            MaaEvent(
+                CoreMessage.TASK_CHAIN_START,
+                {"taskchain": "Custom", "taskid": 92},
+            ),
+            MaaEvent(
+                CoreMessage.TASK_CHAIN_ERROR,
+                {
+                    "taskchain": "Custom",
+                    "taskid": 92,
+                    "details": {"error": "NoMatch"},
+                },
+            ),
+        ]
+
+    monkeypatch.setattr(debug_cli, "_run_stage", run_stage)
+    monkeypatch.setattr(debug_cli, "run_custom_tasks", fail_recovery)
+    arguments = types.SimpleNamespace(
+        command="run-campaign",
+        confirm_formal_battle=True,
+        package_dir=str(tmp_path / "package"),
+        evidence_root=str(tmp_path / "evidence"),
+        dll=None,
+        resource_dir=None,
+        user_dir=None,
+        template_root=None,
+        state_memory_dir=None,
+        adb=str(tmp_path / "adb.exe"),
+        address="emulator-5554",
+        connect_config="General",
+        timeout=600,
+        verify_threshold=0.86,
+        stages=["OF-1"],
+        jobs_root=str(jobs_root),
+        roster=str(tmp_path / "OperBoxData.json"),
+        operbox_data=None,
+        round_name="test-campaign-recovery-failure",
+        campaign_id="campaign-recovery-failure",
+        resume_campaign=False,
+        recovery_evidence=None,
+        max_attempts_per_stage=2,
+        max_total_attempts=2,
+        max_elapsed_seconds=3600,
+        max_sanity=42,
+        sanity_cost=["OF-1=21"],
+    )
+
+    envelope, exit_code = debug_cli._run_campaign(arguments)
+
+    assert exit_code == 2
+    assert envelope["status"] == "PAUSED"
+    assert len(selected_jobs) == 1
+    assert len(envelope["data"]["attempts"]) == 1
+    assert "non-three-star settlement" in envelope["errors"][0]
 
 
 def test_run_campaign_exercises_real_stage_orchestration_across_candidates(
@@ -991,9 +1097,12 @@ def test_run_campaign_exercises_real_stage_orchestration_across_candidates(
         )
         return verification, [screenshot]
 
-    def recover_surface(**_kwargs):
+    def recover_surface(**kwargs):
         nonlocal recovery_calls
         recovery_calls += 1
+        assert kwargs["task_names"] == [
+            "Copilot@ClickCornerUntilStartButton"
+        ]
         return [
             MaaEvent(
                 CoreMessage.TASK_CHAIN_START,
