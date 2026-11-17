@@ -116,6 +116,14 @@ def test_stage_distinguishes_cooperative_stop_from_connection_loss(
             CoreMessage.TASK_CHAIN_START,
             {"taskchain": "Copilot", "taskid": 44},
         ),
+        MaaEvent(
+            CoreMessage.SUB_TASK_COMPLETED,
+            {
+                "taskchain": "Copilot",
+                "taskid": 44,
+                "details": {"task": "Copilot@BattleStartNormal"},
+            },
+        ),
         MaaEvent(terminal_message, event_details),
     ]
 
@@ -161,6 +169,7 @@ def test_stage_distinguishes_cooperative_stop_from_connection_loss(
 
     assert exit_code == 2
     assert envelope["status"] == expected_status
+    assert envelope["data"]["formal_battle_started"] is True
     assert envelope["data"]["safe_exit_verified"] is expected_safe
     if expected_status == RunPhase.STOPPED.value:
         assert envelope["data"]["post_stop_state"]["state"]["name"] == "home"

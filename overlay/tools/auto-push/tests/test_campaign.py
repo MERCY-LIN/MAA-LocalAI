@@ -126,6 +126,46 @@ def test_campaign_reserves_attempt_and_sanity_before_battle(tmp_path: Path):
     assert store.load().attempts[0].battle_result_status == "two_star"
 
 
+def test_successful_attempt_and_stage_advance_are_saved_together(tmp_path: Path):
+    store = CampaignStore(tmp_path, "campaign-atomic-success")
+    state = store.create(
+        stages=["OF-1"],
+        policy=CampaignPolicy(
+            sanity_costs={"OF-1": 21},
+            max_sanity=21,
+        ),
+    )
+    store.begin_attempt(
+        state,
+        CampaignAttempt(
+            stage="OF-1",
+            job="job.json",
+            run_id="run-success",
+            attempt_id="attempt-success",
+            status="IN_FLIGHT",
+            outcome=None,
+            sanity_cost=21,
+            formal_battle_started=False,
+        ),
+    )
+
+    store.finish_attempt(
+        state,
+        "attempt-success",
+        status="SUCCEEDED",
+        outcome="SUCCEEDED",
+        sanity_cost=21,
+        formal_battle_started=True,
+        battle_result_status="three_star",
+        advance_stage=True,
+    )
+
+    loaded = store.load()
+    assert loaded.stage_index == 1
+    assert loaded.attempts[0].status == "SUCCEEDED"
+    assert loaded.attempts[0].battle_result_status == "three_star"
+
+
 def test_parse_sanity_costs_is_strict():
     assert parse_sanity_costs(["OF-1=21", "OF-2=18"]) == {
         "OF-1": 21,

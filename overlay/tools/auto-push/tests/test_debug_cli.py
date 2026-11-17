@@ -45,6 +45,17 @@ def _three_star_image() -> np.ndarray:
     return image
 
 
+def _battle_started_event(task_id: int) -> MaaEvent:
+    return MaaEvent(
+        CoreMessage.SUB_TASK_COMPLETED,
+        {
+            "taskchain": "Copilot",
+            "taskid": task_id,
+            "details": {"task": "Copilot@BattleStartNormal"},
+        },
+    )
+
+
 def test_replay_reuses_saved_result_image(
     tmp_path: Path,
     capsys,
@@ -239,6 +250,7 @@ def test_run_stage_returns_to_map_and_navigates_next_stage(
             CoreMessage.TASK_CHAIN_START,
             {"taskchain": "Copilot", "taskid": 12},
         ),
+        _battle_started_event(12),
         MaaEvent(
             CoreMessage.TASK_CHAIN_COMPLETED,
             {"taskchain": "Copilot", "taskid": 12},
@@ -392,13 +404,16 @@ def test_formal_battle_flag_stays_false_when_core_never_starts(
         "BattleResultVerifier",
         lambda *_args, **_kwargs: types.SimpleNamespace(),
     )
-    monkeypatch.setattr(
-        debug_cli,
-        "run_copilot_file",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            RuntimeError("core failed before task start")
-        ),
-    )
+    def fail_before_formal_start(**kwargs):
+        kwargs["event_sink"](
+            MaaEvent(
+                CoreMessage.TASK_CHAIN_START,
+                {"taskchain": "Copilot", "taskid": 61},
+            )
+        )
+        raise RuntimeError("core failed before formal battle start")
+
+    monkeypatch.setattr(debug_cli, "run_copilot_file", fail_before_formal_start)
 
     exit_code = main(
         [
@@ -713,6 +728,21 @@ def test_run_campaign_switches_candidates_until_three_star(
         lambda *_args, **_kwargs: candidates,
     )
     selected_jobs: list[str] = []
+    recovery_calls = 0
+
+    def recover_surface(**_kwargs):
+        nonlocal recovery_calls
+        recovery_calls += 1
+        return [
+            MaaEvent(
+                CoreMessage.TASK_CHAIN_START,
+                {"taskchain": "Custom", "taskid": 90},
+            ),
+            MaaEvent(
+                CoreMessage.TASK_CHAIN_COMPLETED,
+                {"taskchain": "Custom", "taskid": 90},
+            ),
+        ]
 
     def run_stage(config):
         selected_jobs.append(config.copilot)
@@ -746,6 +776,7 @@ def test_run_campaign_switches_candidates_until_three_star(
         )
 
     monkeypatch.setattr(debug_cli, "_run_stage", run_stage)
+    monkeypatch.setattr(debug_cli, "run_custom_tasks", recover_surface)
     arguments = types.SimpleNamespace(
         command="run-campaign",
         confirm_formal_battle=True,
@@ -783,6 +814,7 @@ def test_run_campaign_switches_candidates_until_three_star(
         candidates[0].strategy.strategy_id,
         candidates[1].strategy.strategy_id,
     ]
+    assert recovery_calls == 1
     assert envelope["data"]["sanity_spent"] == 42
     assert [item["status"] for item in envelope["data"]["attempts"]] == [
         "FAILED",
@@ -886,6 +918,7 @@ def test_run_campaign_exercises_real_stage_orchestration_across_candidates(
         return {"screenshot": screenshot}, [str(path)]
 
     run_count = 0
+    recovery_calls = 0
 
     def fake_run_copilot_file(**kwargs):
         nonlocal run_count
@@ -894,6 +927,8 @@ def test_run_campaign_exercises_real_stage_orchestration_across_candidates(
         common = {"taskchain": "Copilot", "taskid": 20 + run_count}
         emitted = [MaaEvent(CoreMessage.TASK_CHAIN_START, common)]
         event_sink(emitted[0])
+        emitted.append(_battle_started_event(20 + run_count))
+        event_sink(emitted[-1])
         if run_count == 1:
             emitted.append(
                 MaaEvent(
@@ -955,6 +990,20 @@ def test_run_campaign_exercises_real_stage_orchestration_across_candidates(
         )
         return verification, [screenshot]
 
+    def recover_surface(**_kwargs):
+        nonlocal recovery_calls
+        recovery_calls += 1
+        return [
+            MaaEvent(
+                CoreMessage.TASK_CHAIN_START,
+                {"taskchain": "Custom", "taskid": 91},
+            ),
+            MaaEvent(
+                CoreMessage.TASK_CHAIN_COMPLETED,
+                {"taskchain": "Custom", "taskid": 91},
+            ),
+        ]
+
     monkeypatch.setattr(debug_cli, "_maa_version", lambda _path: "test")
     monkeypatch.setattr(debug_cli, "_maa_processes", lambda: [])
     monkeypatch.setattr(debug_cli, "DeviceControlLease", FakeLease)
@@ -972,6 +1021,7 @@ def test_run_campaign_exercises_real_stage_orchestration_across_candidates(
     )
     monkeypatch.setattr(debug_cli, "BattleResultVerifier", FakeVerifier)
     monkeypatch.setattr(debug_cli, "run_copilot_file", fake_run_copilot_file)
+    monkeypatch.setattr(debug_cli, "run_custom_tasks", recover_surface)
     monkeypatch.setattr(debug_cli, "load_roster", lambda _path: {})
     monkeypatch.setattr(
         debug_cli,
@@ -1018,6 +1068,7 @@ def test_run_campaign_exercises_real_stage_orchestration_across_candidates(
     assert exit_code == 0, envelope
     assert run_count == 2
     assert fallback_captures == 1
+    assert recovery_calls == 1
     assert envelope["status"] == "OK"
     assert envelope["data"]["sanity_spent"] == 42
     assert [item["status"] for item in envelope["data"]["attempts"]] == [
@@ -1118,6 +1169,7 @@ def test_interrupted_campaign_reconciles_original_attempt_without_rerun(
                 {"taskchain": "Copilot", "taskid": 31},
             )
         )
+        kwargs["event_sink"](_battle_started_event(31))
         raise KeyboardInterrupt("simulated process interruption")
 
     monkeypatch.setattr(debug_cli, "_maa_version", lambda _path: "test")
@@ -1191,6 +1243,12 @@ def test_interrupted_campaign_reconciles_original_attempt_without_rerun(
     assert interrupted.attempts[0].status == "IN_FLIGHT"
     original_run_id = interrupted.attempts[0].run_id
     original_attempt_id = interrupted.attempts[0].attempt_id
+
+    paused_envelope, paused_exit = debug_cli._run_campaign(arguments)
+    assert paused_exit == 2
+    assert paused_envelope["status"] == "PAUSED"
+    assert store.load().status == "PAUSED"
+    assert core_calls == 1
 
     arguments.resume_campaign = True
     arguments.recovery_evidence = "state-memory/home"
@@ -1785,6 +1843,7 @@ def test_settlement_is_captured_before_core_returns_and_conflict_is_unknown(
             CoreMessage.TASK_CHAIN_START,
             {"taskchain": "Copilot", "taskid": 7},
         ),
+        _battle_started_event(7),
         MaaEvent(
             CoreMessage.SUB_TASK_START,
             {
@@ -1936,6 +1995,7 @@ def test_task_error_still_captures_explicit_non_three_star_result(
             CoreMessage.TASK_CHAIN_START,
             {"taskchain": "Copilot", "taskid": 9},
         ),
+        _battle_started_event(9),
         MaaEvent(
             CoreMessage.TASK_CHAIN_ERROR,
             {

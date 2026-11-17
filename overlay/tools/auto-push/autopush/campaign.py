@@ -170,6 +170,7 @@ class CampaignState:
         formal_battle_started: bool,
         task_execution_error: bool = False,
         battle_result_status: str | None = None,
+        advance_stage: bool = False,
     ) -> CampaignAttempt:
         """Finish the one in-flight attempt and reconcile its reservation."""
 
@@ -180,6 +181,10 @@ class CampaignState:
                 raise CampaignError("campaign attempt is already finished")
             if sanity_cost < 0:
                 raise CampaignError("campaign attempt sanity cost is negative")
+            if advance_stage and self.current_stage != attempt.stage:
+                raise CampaignError(
+                    "only the current campaign stage can be advanced"
+                )
             finished = replace(
                 attempt,
                 status=status,
@@ -194,6 +199,9 @@ class CampaignState:
             if self.sanity_spent < 0:
                 raise CampaignError("campaign sanity reconciliation went negative")
             self.attempts[index] = finished
+            if advance_stage:
+                self.stage_index += 1
+                self.next_candidate_index[attempt.stage] = 0
             self.updated_at = utc_now()
             return finished
         raise CampaignError(f"campaign in-flight attempt not found: {attempt_id}")

@@ -48,6 +48,8 @@ from .maa_core import (
     MaaCoreError,
     MaaEvent,
     MaaCoreLibrary,
+    canonical_task_name,
+    run_custom_tasks,
     run_copilot_file,
     run_stage_navigation,
     summarize_events,
@@ -108,6 +110,17 @@ SAFE_POST_STOP_STATES = {
     "terminal_protocol",
 }
 TARGET_STAGE_DETAIL_PREFIX = "stage_detail_"
+FORMAL_BATTLE_START_TASKS = {
+    "BattleStartAdverse",
+    "BattleStartExercise",
+    "BattleStartNormal",
+    "BattleStartOCR",
+    "BattleStartRaid",
+    "BattleStartSimulation",
+    "BattleStartSimulationForTwo",
+    "BattleStartTrials",
+    "BattleStartTrialsRaid",
+}
 NAVIGABLE_PREFLIGHT_STATES = {
     "event_map",
     "home",
@@ -163,6 +176,15 @@ def _stage_navigation_name(package_dir: Path, stage: str) -> str:
             if isinstance(code, str) and code.strip():
                 return code.strip()
     return stage
+
+
+def _event_confirms_formal_battle(event: MaaEvent) -> bool:
+    if event.message_name != "SUB_TASK_COMPLETED":
+        return False
+    details = event.details.get("details")
+    if not isinstance(details, dict):
+        return False
+    return canonical_task_name(details.get("task")) in FORMAL_BATTLE_START_TASKS
 
 
 def _resolve(value: str | None, default: Path) -> Path:
@@ -1295,10 +1317,7 @@ def _run_stage(
         def record_core_event(event: MaaEvent) -> None:
             nonlocal formal_battle_started
             _write_maa_event(store, event)
-            if (
-                event.message_name == "TASK_CHAIN_START"
-                and event.task_chain == "Copilot"
-            ):
+            if _event_confirms_formal_battle(event):
                 formal_battle_started = True
                 store.update_status(
                     RunPhase.RUNNING,
@@ -1330,7 +1349,7 @@ def _run_stage(
             stop_requested=store.stop_requested,
         )
         formal_battle_started = formal_battle_started or any(
-            event.message_name == "TASK_CHAIN_START" for event in events
+            _event_confirms_formal_battle(event) for event in events
         )
         summary = summarize_events(events)
         result_path = store.run_dir / "artifacts" / "result.png"
@@ -2157,10 +2176,8 @@ def _reconcile_campaign_checkpoint(
         formal_battle_started=formal_battle_started,
         task_execution_error=task_execution_error,
         battle_result_status=battle_result_status,
+        advance_stage=reconciled_status == "SUCCEEDED",
     )
-    if reconciled_status == "SUCCEEDED" and pending.stage == state.current_stage:
-        state.stage_index += 1
-        state.next_candidate_index[pending.stage] = 0
 
     explicitly_resolved = (
         reconciled_status in {"SUCCEEDED", "FAILED", "STOPPED"}
@@ -2242,6 +2259,55 @@ def _campaign_envelope(
     )
 
 
+def _recover_campaign_surface(
+    *,
+    dll_path: Path,
+    resource_dir: Path,
+    user_dir: Path,
+    adb_path: Path,
+    address: str,
+    connect_config: str,
+    stage: str,
+    timeout_seconds: int = 120,
+) -> dict[str, Any]:
+    """Advance out of an explicit non-three-star settlement using MaaCore."""
+
+    recovery_metrics = RoundMetrics(
+        round_name="localai-campaign-surface-recovery",
+        stage=stage,
+        limits=BudgetLimits(
+            screenshots=0,
+            tool_calls=60,
+            strategy_runs=1,
+        ),
+    )
+    events = run_custom_tasks(
+        dll_path=dll_path,
+        resource_dir=resource_dir,
+        user_dir=user_dir,
+        adb_path=adb_path,
+        address=address,
+        connect_config=connect_config,
+        task_names=["Copilot@ClickCornerUntilStartButton"],
+        metrics=recovery_metrics,
+        timeout_seconds=min(120, timeout_seconds),
+    )
+    summary = summarize_events(events)
+    return {
+        "task": summary,
+        "recovery_method": "Copilot@ClickCornerUntilStartButton",
+        "events": [
+            {
+                "message_id": event.message_id,
+                "message_name": event.message_name,
+                "task_id": event.task_id,
+                "details": event.details,
+            }
+            for event in events
+        ],
+    }
+
+
 def _run_campaign(
     arguments: argparse.Namespace,
 ) -> tuple[dict[str, Any], int]:
@@ -2309,14 +2375,16 @@ def _run_campaign(
             )
         if state.in_flight_attempt is not None:
             if not getattr(arguments, "resume_campaign", False):
+                state.pause(
+                    "campaign has an in-flight attempt and requires "
+                    "--resume-campaign for checkpoint reconciliation"
+                )
+                store.save(state)
                 return _campaign_envelope(
                     state,
                     store,
                     status="PAUSED",
-                    errors=[
-                        "campaign has an in-flight attempt and requires "
-                        "--resume-campaign for checkpoint reconciliation"
-                    ],
+                    errors=[state.pause_reason],
                 )
             safe_to_continue = _reconcile_campaign_checkpoint(
                 state,
@@ -2600,6 +2668,7 @@ def _run_campaign(
                 if battle_result_status is not None
                 else None
             ),
+            advance_stage=envelope.get("status") == "SUCCEEDED",
         )
         store.append_event(
             "attempt_finished",
@@ -2610,9 +2679,6 @@ def _run_campaign(
                 "stage_succeeded",
                 {"stage": stage, "job": finished.job},
             )
-            state.stage_index += 1
-            state.next_candidate_index[stage] = 0
-            store.save(state)
             continue
         if (
             envelope.get("status") == "FAILED"
@@ -2620,6 +2686,50 @@ def _run_campaign(
             and data.get("verification_status")
             in {"two_star", "non_three_star"}
         ):
+            try:
+                recovery = _recover_campaign_surface(
+                    dll_path=dll_path,
+                    resource_dir=resource_dir,
+                    user_dir=user_dir,
+                    adb_path=adb_path,
+                    address=arguments.address,
+                    connect_config=arguments.connect_config,
+                    stage=stage,
+                    timeout_seconds=arguments.timeout,
+                )
+            except Exception as exception:
+                state.pause(
+                    "campaign could not leave the non-three-star settlement "
+                    f"at stage={stage}: {type(exception).__name__}: {exception}"
+                )
+                store.save(state)
+                store.append_event(
+                    "campaign_surface_recovery_failed",
+                    {"stage": stage, "reason": state.pause_reason},
+                )
+                return _campaign_envelope(
+                    state,
+                    store,
+                    status="PAUSED",
+                    errors=[state.pause_reason],
+                )
+            store.append_event(
+                "campaign_surface_recovered",
+                {"stage": stage, **recovery},
+            )
+            if recovery["task"]["terminal_state"] != "COMPLETED":
+                state.pause(
+                    "campaign could not verify leaving the non-three-star "
+                    f"settlement at stage={stage}: "
+                    f"{recovery['task']['terminal_state']}"
+                )
+                store.save(state)
+                return _campaign_envelope(
+                    state,
+                    store,
+                    status="PAUSED",
+                    errors=[state.pause_reason],
+                )
             continue
         state.pause(
             "campaign paused after "

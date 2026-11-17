@@ -270,3 +270,30 @@ def test_module_number_and_module_level_are_checked_separately():
         allow_support=False,
     )
     assert matching.status == "ready"
+
+    no_module = CopilotStrategy.from_dict(
+        {
+            "stage_name": "act55side_08",
+            "opers": [
+                {
+                    "name": "A",
+                    "requirements": {"module": 0},
+                }
+            ],
+            "actions": [],
+        }
+    )
+    assert no_module.direct_operators[0].module == 0
+    no_module_result = evaluate_strategy(
+        no_module,
+        {
+            "A": RosterOperator(
+                "A",
+                elite=2,
+                level=90,
+                skill_level=10,
+            )
+        },
+        allow_support=False,
+    )
+    assert no_module_result.status == "ready"

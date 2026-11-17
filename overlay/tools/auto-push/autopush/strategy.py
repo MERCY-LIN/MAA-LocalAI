@@ -202,13 +202,19 @@ class CandidateEvaluation:
 def _parse_requirement(payload: dict[str, Any]) -> OperatorRequirement:
     raw_requirements = payload.get("requirements")
     requirements = raw_requirements if isinstance(raw_requirements, dict) else {}
+    raw_module = requirements.get("module")
+    raw_module_level = requirements.get("module_level")
     return OperatorRequirement(
         name=str(payload.get("name", "")),
         elite=int(requirements.get("elite", 0) or 0),
         level=int(requirements.get("level", 0) or 0),
         skill_level=int(requirements.get("skill_level", 0) or 0),
-        module=int(requirements.get("module", -1) or -1),
-        module_level=int(requirements.get("module_level", -1) or -1),
+        module=int(raw_module) if raw_module is not None else -1,
+        module_level=(
+            int(raw_module_level)
+            if raw_module_level is not None
+            else -1
+        ),
         skill=int(payload["skill"]) if payload.get("skill") is not None else None,
         requirements_declared=bool(requirements),
     )
