@@ -74,6 +74,13 @@ jobs:
             -File tools\localai-workflow\localai.ps1 test-dotnet `
             -Dotnet $dotnet
 
+      - name: Bootstrap MaaDeps
+        shell: pwsh
+        working-directory: maa-source
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python tools/maadeps-download.py x64-windows
+
       - name: Build MaaCore Debug
         shell: pwsh
         working-directory: maa-source
