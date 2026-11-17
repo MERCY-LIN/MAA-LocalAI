@@ -78,6 +78,20 @@ jobs:
         shell: pwsh
         working-directory: maa-source
         run: |
-          cmake --preset windows-x64
-          cmake --build build --target MaaCore --config Debug `
-            --parallel $env:NUMBER_OF_PROCESSORS
+          $configureLog = "cmake-configure.log"
+          & cmake --preset windows-x64 2>&1 | Tee-Object -FilePath $configureLog
+          if ($LASTEXITCODE -ne 0) {
+            $tail = (Get-Content $configureLog -Tail 20) -join "`n"
+            $annotation = $tail.Replace("%", "%25").Replace("`r", "").Replace("`n", "%0A")
+            Write-Output "::error title=CMake configure failed::$annotation"
+            exit 1
+          }
+          $buildLog = "cmake-build.log"
+          & cmake --build build --target MaaCore --config Debug `
+            --parallel $env:NUMBER_OF_PROCESSORS 2>&1 | Tee-Object -FilePath $buildLog
+          if ($LASTEXITCODE -ne 0) {
+            $tail = (Get-Content $buildLog -Tail 20) -join "`n"
+            $annotation = $tail.Replace("%", "%25").Replace("`r", "").Replace("`n", "%0A")
+            Write-Output "::error title=CMake build failed::$annotation"
+            exit 1
+          }
