@@ -2141,34 +2141,44 @@ def _reconcile_campaign_checkpoint(
         )
     )
     sanity_cost = 0 if explicitly_not_started else pending.sanity_cost
+    interrupted_active = phase in ACTIVE_STATUSES
+    reconciled_status = "ABORTED" if interrupted_active else phase
+    reconciled_outcome = (
+        "INTERRUPTED_UNVERIFIED"
+        if interrupted_active
+        else str(outcome) if outcome is not None else None
+    )
     store.finish_attempt(
         state,
         pending.attempt_id,
-        status=phase,
-        outcome=str(outcome) if outcome is not None else None,
+        status=reconciled_status,
+        outcome=reconciled_outcome,
         sanity_cost=sanity_cost,
         formal_battle_started=formal_battle_started,
         task_execution_error=task_execution_error,
         battle_result_status=battle_result_status,
     )
-    if phase == "SUCCEEDED" and pending.stage == state.current_stage:
+    if reconciled_status == "SUCCEEDED" and pending.stage == state.current_stage:
         state.stage_index += 1
         state.next_candidate_index[pending.stage] = 0
 
     explicitly_resolved = (
-        phase in {"SUCCEEDED", "FAILED", "STOPPED"}
+        reconciled_status in {"SUCCEEDED", "FAILED", "STOPPED"}
         and (
-            phase == "SUCCEEDED"
+            reconciled_status == "SUCCEEDED"
             or battle_result_status
             in {"three_star", "two_star", "non_three_star"}
-            or phase == "STOPPED"
+            or reconciled_status == "STOPPED"
         )
     )
-    if not formal_battle_started and phase in {"BLOCKED", "FAILED", "UNKNOWN"}:
+    if (
+        not formal_battle_started
+        and reconciled_status in {"BLOCKED", "FAILED", "UNKNOWN"}
+    ):
         explicitly_resolved = True
     state.pause(
         "reconciled interrupted attempt "
-        f"run_id={pending.run_id} status={phase} "
+        f"run_id={pending.run_id} status={reconciled_status} "
         f"result={battle_result_status or 'unknown'}; recovery evidence "
         "is required before another formal battle"
     )
@@ -2177,8 +2187,8 @@ def _reconcile_campaign_checkpoint(
         {
             "attempt_id": pending.attempt_id,
             "run_id": pending.run_id,
-            "status": phase,
-            "outcome": outcome,
+            "status": reconciled_status,
+            "outcome": reconciled_outcome,
             "formal_battle_started": formal_battle_started,
             "battle_result_status": battle_result_status,
             "sanity_cost": sanity_cost,

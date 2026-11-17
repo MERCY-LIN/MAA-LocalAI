@@ -31,6 +31,7 @@ jobs:
           repository: MaaAssistantArknights/MaaAssistantArknights
           ref: ${{ steps.base.outputs.commit }}
           path: maa-source
+          submodules: recursive
 
       - name: Apply verified overlay
         shell: pwsh
