@@ -1570,6 +1570,220 @@ def test_run_campaign_continues_across_all_stages(
     assert envelope["data"]["sanity_spent"] == 42
 
 
+def test_campaign_two_stages_uses_real_orchestration_and_navigation(
+    tmp_path: Path,
+    monkeypatch,
+):
+    (tmp_path / "adb.exe").write_bytes(b"adb")
+    roster = tmp_path / "OperBoxData.json"
+    roster.write_text("{}", encoding="utf-8")
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+    (package_dir / "MaaCore.dll").write_bytes(b"not a library")
+    jobs_root = tmp_path / "jobs"
+    job_paths = {}
+    candidates = {}
+    for stage in ("OF-1", "OF-2"):
+        stage_dir = jobs_root / stage
+        stage_dir.mkdir(parents=True)
+        job_path = stage_dir / "job.json"
+        job_path.write_text(
+            json.dumps({"stage_name": stage, "opers": []}),
+            encoding="utf-8",
+        )
+        job_paths[stage] = job_path
+        candidates[stage] = types.SimpleNamespace(
+            strategy=types.SimpleNamespace(
+                strategy_id=str(job_path),
+                raw={},
+            ),
+            status="ready",
+            requirements_satisfied=True,
+            missing=(),
+            diagnostics=(),
+            lineup=(),
+        )
+    state = {"screen": "stage_detail_OF-1"}
+
+    class FakeLease:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def acquire(self):
+            return None
+
+        def release(self):
+            return None
+
+    class FakeAdb:
+        def __init__(self, **_kwargs):
+            pass
+
+        def devices(self):
+            return ["emulator-5554"]
+
+    class FakeMemory:
+        @staticmethod
+        def recognize(_image, **_kwargs):
+            return types.SimpleNamespace(
+                name=state["screen"],
+                known=True,
+                distance=0.0,
+                confidence=1.0,
+                reference_path=None,
+            )
+
+    class FakeVerifier:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def verify(self, _image, **_kwargs):
+            return ResultVerification(
+                status="three_star",
+                stars=3,
+                confidence=0.99,
+                evidence=(),
+                needs_computer_use=False,
+            )
+
+    snapshot_count = 0
+
+    def fake_snapshot(store, **kwargs):
+        nonlocal snapshot_count
+        snapshot_count += 1
+        path = (
+            store.run_dir
+            / "snapshots"
+            / f"{snapshot_count}-{kwargs['label']}.png"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        assert cv2.imwrite(
+            str(path),
+            np.zeros((720, 1280, 3), dtype=np.uint8),
+        )
+        screenshot = {"path": str(path), "sequence": snapshot_count}
+        return {"screenshot": screenshot}, [str(path)]
+
+    navigation_calls = []
+
+    def fake_navigation(**kwargs):
+        navigation_calls.append(
+            (kwargs["stage"], kwargs["return_to_map"])
+        )
+        state["screen"] = "stage_detail_OF-2"
+        return [
+            MaaEvent(
+                CoreMessage.TASK_CHAIN_START,
+                {"taskchain": "StageNavigation", "taskid": 70},
+            ),
+            MaaEvent(
+                CoreMessage.TASK_CHAIN_COMPLETED,
+                {"taskchain": "StageNavigation", "taskid": 70},
+            ),
+        ]
+
+    core_runs = 0
+
+    def fake_run_copilot_file(**kwargs):
+        nonlocal core_runs
+        core_runs += 1
+        stage = "OF-1" if core_runs == 1 else "OF-2"
+        task_id = 70 + core_runs
+        common = {"taskchain": "Copilot", "taskid": task_id}
+        events = [
+            MaaEvent(CoreMessage.TASK_CHAIN_START, common),
+            _battle_started_event(task_id),
+            MaaEvent(
+                CoreMessage.SUB_TASK_START,
+                {
+                    **common,
+                    "details": {
+                        "task": "Copilot@StageDrops-Stars-3",
+                        "result": {"score": 0.99},
+                    },
+                },
+            ),
+        ]
+        settlement_path = Path(kwargs["settlement_capture_path"])
+        settlement_path.parent.mkdir(parents=True, exist_ok=True)
+        assert cv2.imwrite(
+            str(settlement_path),
+            np.zeros((720, 1280, 3), dtype=np.uint8),
+        )
+        events.append(MaaEvent(CoreMessage.TASK_CHAIN_COMPLETED, common))
+        for event in events:
+            kwargs["event_sink"](event)
+        state["screen"] = f"stage_detail_{stage}"
+        return events
+
+    monkeypatch.setattr(debug_cli, "_maa_version", lambda _path: "test")
+    monkeypatch.setattr(debug_cli, "_maa_processes", lambda: [])
+    monkeypatch.setattr(debug_cli, "DeviceControlLease", FakeLease)
+    monkeypatch.setattr(debug_cli, "AdbClient", FakeAdb)
+    monkeypatch.setattr(debug_cli, "_snapshot_payload", fake_snapshot)
+    monkeypatch.setattr(debug_cli, "run_stage_navigation", fake_navigation)
+    monkeypatch.setattr(debug_cli, "run_copilot_file", fake_run_copilot_file)
+    monkeypatch.setattr(
+        debug_cli,
+        "VisualStateMemory",
+        types.SimpleNamespace(load=lambda *_args, **_kwargs: FakeMemory()),
+    )
+    monkeypatch.setattr(debug_cli, "BattleResultVerifier", FakeVerifier)
+    monkeypatch.setattr(debug_cli, "load_roster", lambda _path: {})
+    monkeypatch.setattr(
+        debug_cli,
+        "collect_strategy_files",
+        lambda paths: [job_paths[Path(paths[0]).name]],
+    )
+    monkeypatch.setattr(
+        debug_cli,
+        "rank_strategies",
+        lambda _paths, stage, _roster, **_kwargs: [candidates[stage]],
+    )
+    arguments = types.SimpleNamespace(
+        command="run-campaign",
+        confirm_formal_battle=True,
+        package_dir=str(package_dir),
+        evidence_root=str(tmp_path / "evidence"),
+        dll=None,
+        resource_dir=None,
+        user_dir=None,
+        template_root=None,
+        state_memory_dir=None,
+        adb=str(tmp_path / "adb.exe"),
+        address="emulator-5554",
+        connect_config="General",
+        timeout=600,
+        verify_threshold=0.86,
+        stages=["OF-1", "OF-2"],
+        jobs_root=str(jobs_root),
+        roster=str(roster),
+        operbox_data=None,
+        round_name="test-integrated-two-stages",
+        campaign_id="campaign-integrated-two-stages",
+        resume_campaign=False,
+        recovery_evidence=None,
+        max_attempts_per_stage=1,
+        max_total_attempts=2,
+        max_elapsed_seconds=3600,
+        max_sanity=42,
+        sanity_cost=["OF-1=21", "OF-2=21"],
+    )
+
+    envelope, exit_code = debug_cli._run_campaign(arguments)
+
+    assert exit_code == 0, envelope
+    assert core_runs == 2
+    assert navigation_calls == [("OF-2", True)]
+    assert envelope["status"] == "OK"
+    assert envelope["data"]["campaign"]["stage_index"] == 2
+    assert envelope["data"]["sanity_spent"] == 42
+    assert [item["stage"] for item in envelope["data"]["attempts"]] == [
+        "OF-1",
+        "OF-2",
+    ]
+
+
 def test_campaign_time_budget_blocks_before_another_stage(
     tmp_path: Path,
     monkeypatch,
