@@ -22,9 +22,10 @@ OpenCV result verification, and auditable per-round metrics.
   preflight screenshots, bounded stop requests, and saved-result replay.
 - Shared `StageExecutionConfig` validation for single-stage and campaign runs,
   including `verify_threshold` and the same formal-battle safety defaults.
-- Settlement capture triggered from the MaaCore three-star callback before Core
-  leaves the result page; both `StageDrops-Stars-3` resource names normalize to
-  one callback label.
+- Settlement capture is performed synchronously by a MaaCore task plugin while
+  the matched result frame is still owned by the task thread. Python no longer
+  captures from the asynchronous callback thread, avoiding the thread-affine
+  device mutex conflict.
 - Conservative screenshot/Core evidence reconciliation. Conflicting evidence
   is preserved as `conflict`, never promoted to a three-star success.
 - Unique full-roster lineup assignment with separate `requirements_satisfied`
@@ -37,7 +38,10 @@ OpenCV result verification, and auditable per-round metrics.
   of saved recognition, callback state transitions, and evidence decisions.
 - Persistent multi-stage campaign queue with candidate switching after explicit
   non-three-star results, per-stage and total attempt limits, elapsed-time and
-  sanity budgets, and atomic checkpoint recovery.
+  sanity budgets, and atomic checkpoint recovery. The attempt and sanity cost
+  are persisted before formal execution and reconciled before resume.
+- Cross-stage campaigns return from the previous stage detail page, navigate
+  through MaaCore to the next stage, and require an exact target-detail preflight.
 - Unknown, conflicting, blocked, or budget-exhausted campaign states pause the
   queue and require recovery evidence instead of silently starting another run.
 - Post-stop safe-exit verification now captures and recognizes the page after

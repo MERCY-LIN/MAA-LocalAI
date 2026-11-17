@@ -1,5 +1,6 @@
 import json
 import sys
+import threading
 import types
 from pathlib import Path
 
@@ -14,7 +15,9 @@ from autopush.debug_cli import (
     _capture_verified_result,
     _is_safe_preflight_state,
     _is_safe_post_stop_state,
+    _preflight_transition,
     _snapshot_image,
+    _stage_navigation_name,
     main,
 )
 from autopush.evidence import EvidenceError
@@ -94,6 +97,45 @@ def test_replay_reuses_saved_result_image(
     assert envelope["data"]["evidence_resolution"]["status"] == "three_star"
 
 
+def test_replay_uses_result_path_persisted_in_status(
+    tmp_path: Path,
+    capsys,
+):
+    evidence_root = tmp_path / "evidence"
+    store = RunStore(
+        evidence_root,
+        run_id="run-replay-settlement",
+        attempt_id="attempt-replay-settlement",
+    )
+    settlement_path = (
+        store.run_dir / "artifacts" / "settlement-at-core-star.png"
+    )
+    settlement_path.parent.mkdir(parents=True)
+    assert cv2.imwrite(str(settlement_path), _three_star_image())
+    store.update_status(
+        RunPhase.SUCCEEDED,
+        stage="stage",
+        result_screenshot=str(settlement_path),
+    )
+
+    exit_code = main(
+        [
+            "replay",
+            "--evidence-root",
+            str(evidence_root),
+            "--run-id",
+            "run-replay-settlement",
+            "--template-root",
+            str(TEMPLATE_ROOT),
+        ]
+    )
+    envelope = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert envelope["data"]["image"] == str(settlement_path.resolve())
+    assert envelope["data"]["verification"]["status"] == "three_star"
+
+
 def test_default_adb_discovery_has_no_undefined_candidate(monkeypatch):
     monkeypatch.delenv("MAA_LOCALAI_ADB", raising=False)
 
@@ -111,6 +153,274 @@ def test_preflight_accepts_only_exact_target_stage_detail():
         "act55side_ex05",
     )
     assert not _is_safe_preflight_state("unknown", "act55side_ex05")
+
+
+def test_campaign_preflight_requires_explicit_stage_transition():
+    assert _preflight_transition("stage_detail_OF-1", "OF-2") == (
+        "navigate",
+        True,
+    )
+    assert _preflight_transition("event_map", "OF-2") == ("navigate", False)
+    assert _preflight_transition("stage_detail_OF-2", "OF-2") == (
+        "ready",
+        False,
+    )
+    assert _preflight_transition("unknown", "OF-2") == ("blocked", False)
+
+
+def test_stage_navigation_uses_tile_display_code():
+    assert _stage_navigation_name(REPOSITORY, "act55side_ex08") == "TL-EX-8"
+
+
+def test_run_stage_returns_to_map_and_navigates_next_stage(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+):
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+    (package_dir / "MaaCore.dll").write_bytes(b"not a library")
+    copilot = tmp_path / "job.json"
+    copilot.write_text(
+        json.dumps({"stage_name": "OF-2", "opers": []}),
+        encoding="utf-8",
+    )
+    state = {"name": "stage_detail_OF-1"}
+
+    class FakeLease:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def acquire(self):
+            return None
+
+        def release(self):
+            return None
+
+    class FakeAdb:
+        def __init__(self, **_kwargs):
+            pass
+
+        def devices(self):
+            return ["emulator-5554"]
+
+    class FakeMemory:
+        @staticmethod
+        def recognize(_image, **_kwargs):
+            return types.SimpleNamespace(
+                name=state["name"],
+                known=True,
+                distance=0.0,
+                confidence=1.0,
+                reference_path=None,
+            )
+
+    snapshots: list[str] = []
+
+    def fake_snapshot(store, **kwargs):
+        snapshots.append(kwargs["label"])
+        path = (
+            store.run_dir
+            / "snapshots"
+            / f"{len(snapshots)}-{kwargs['label']}.png"
+        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        assert cv2.imwrite(
+            str(path),
+            np.zeros((720, 1280, 3), dtype=np.uint8),
+        )
+        screenshot = {"path": str(path), "sequence": len(snapshots)}
+        return {"screenshot": screenshot}, [str(path)]
+
+    navigation_calls = []
+    events = [
+        MaaEvent(
+            CoreMessage.TASK_CHAIN_START,
+            {"taskchain": "Copilot", "taskid": 12},
+        ),
+        MaaEvent(
+            CoreMessage.TASK_CHAIN_COMPLETED,
+            {"taskchain": "Copilot", "taskid": 12},
+        ),
+    ]
+
+    def fake_navigation(**kwargs):
+        navigation_calls.append(
+            (kwargs["stage"], kwargs["return_to_map"])
+        )
+        state["name"] = "stage_detail_OF-2"
+        return [
+            MaaEvent(
+                CoreMessage.TASK_CHAIN_START,
+                {"taskchain": "StageNavigation", "taskid": 11},
+            ),
+            MaaEvent(
+                CoreMessage.TASK_CHAIN_COMPLETED,
+                {"taskchain": "StageNavigation", "taskid": 11},
+            ),
+        ]
+
+    def fake_run_copilot_file(**kwargs):
+        for event in events:
+            kwargs["event_sink"](event)
+        settlement_path = Path(kwargs["settlement_capture_path"])
+        settlement_path.parent.mkdir(parents=True, exist_ok=True)
+        assert cv2.imwrite(
+            str(settlement_path),
+            np.zeros((720, 1280, 3), dtype=np.uint8),
+        )
+        return events
+
+    class FakeVerifier:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def verify(self, _image, **_kwargs):
+            return ResultVerification(
+                status="three_star",
+                stars=3,
+                confidence=0.99,
+                evidence=(),
+                needs_computer_use=False,
+            )
+
+    monkeypatch.setattr(debug_cli, "_maa_version", lambda _path: "test")
+    monkeypatch.setattr(debug_cli, "_maa_processes", lambda: [])
+    monkeypatch.setattr(debug_cli, "DeviceControlLease", FakeLease)
+    monkeypatch.setattr(debug_cli, "AdbClient", FakeAdb)
+    monkeypatch.setattr(debug_cli, "_snapshot_payload", fake_snapshot)
+    monkeypatch.setattr(debug_cli, "run_stage_navigation", fake_navigation)
+    monkeypatch.setattr(debug_cli, "run_copilot_file", fake_run_copilot_file)
+    monkeypatch.setattr(
+        debug_cli,
+        "VisualStateMemory",
+        types.SimpleNamespace(load=lambda *_args, **_kwargs: FakeMemory()),
+    )
+    monkeypatch.setattr(debug_cli, "BattleResultVerifier", FakeVerifier)
+
+    exit_code = main(
+        [
+            "run-stage",
+            "--stage",
+            "OF-2",
+            "--copilot",
+            str(copilot),
+            "--package-dir",
+            str(package_dir),
+            "--evidence-root",
+            str(tmp_path / "evidence"),
+            "--adb",
+            sys.executable,
+            "--confirm-formal-battle",
+        ]
+    )
+    envelope = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 0
+    assert navigation_calls == [("OF-2", True)]
+    assert snapshots == ["preflight", "preflight-after-navigation"]
+    assert envelope["status"] == RunPhase.SUCCEEDED.value
+    assert envelope["data"]["formal_battle_started"] is True
+    assert envelope["data"]["preflight_state"]["name"] == "stage_detail_OF-2"
+
+
+def test_formal_battle_flag_stays_false_when_core_never_starts(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+):
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+    (package_dir / "MaaCore.dll").write_bytes(b"not a library")
+    copilot = tmp_path / "job.json"
+    copilot.write_text(
+        json.dumps({"stage_name": "OF-1", "opers": []}),
+        encoding="utf-8",
+    )
+
+    class FakeLease:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def acquire(self):
+            return None
+
+        def release(self):
+            return None
+
+    class FakeAdb:
+        def __init__(self, **_kwargs):
+            pass
+
+        def devices(self):
+            return ["emulator-5554"]
+
+    class FakeMemory:
+        @staticmethod
+        def recognize(_image, **_kwargs):
+            return types.SimpleNamespace(
+                name="stage_detail_OF-1",
+                known=True,
+                distance=0.0,
+                confidence=1.0,
+                reference_path=None,
+            )
+
+    def fake_snapshot(store, **_kwargs):
+        path = store.run_dir / "snapshots" / "preflight.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        assert cv2.imwrite(
+            str(path),
+            np.zeros((720, 1280, 3), dtype=np.uint8),
+        )
+        screenshot = {"path": str(path), "sequence": 1}
+        return {"screenshot": screenshot}, [str(path)]
+
+    monkeypatch.setattr(debug_cli, "_maa_version", lambda _path: "test")
+    monkeypatch.setattr(debug_cli, "_maa_processes", lambda: [])
+    monkeypatch.setattr(debug_cli, "DeviceControlLease", FakeLease)
+    monkeypatch.setattr(debug_cli, "AdbClient", FakeAdb)
+    monkeypatch.setattr(debug_cli, "_snapshot_payload", fake_snapshot)
+    monkeypatch.setattr(
+        debug_cli,
+        "VisualStateMemory",
+        types.SimpleNamespace(load=lambda *_args, **_kwargs: FakeMemory()),
+    )
+    monkeypatch.setattr(
+        debug_cli,
+        "BattleResultVerifier",
+        lambda *_args, **_kwargs: types.SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        debug_cli,
+        "run_copilot_file",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("core failed before task start")
+        ),
+    )
+
+    exit_code = main(
+        [
+            "run-stage",
+            "--stage",
+            "OF-1",
+            "--copilot",
+            str(copilot),
+            "--package-dir",
+            str(package_dir),
+            "--evidence-root",
+            str(tmp_path / "evidence"),
+            "--adb",
+            sys.executable,
+            "--confirm-formal-battle",
+        ]
+    )
+    envelope = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 2
+    assert envelope["status"] == RunPhase.FAILED.value
+    assert envelope["data"]["outcome"] == "FAILED_RUNTIME"
+    assert envelope["data"]["formal_battle_started"] is False
 
 
 def test_post_stop_accepts_only_known_safe_pages():
@@ -296,6 +606,12 @@ def test_run_campaign_uses_deterministic_ranking_and_stops_on_success(
     assert envelope["data"]["attempts"][0]["status"] == "SUCCEEDED"
     assert captured_configs[0].verify_threshold == 0.91
     assert captured_configs[0].ignore_requirements is False
+    assert captured_configs[0].run_id.startswith("run-")
+    assert captured_configs[0].attempt_id.startswith("attempt-")
+    assert (
+        envelope["data"]["attempts"][0]["run_id"]
+        == captured_configs[0].run_id
+    )
 
 
 def test_run_campaign_blocks_degraded_requirements_before_formal_battle(
@@ -674,6 +990,98 @@ def test_run_campaign_continues_across_all_stages(
     assert envelope["data"]["sanity_spent"] == 42
 
 
+def test_run_campaign_reconciles_interrupted_attempt_before_budget_resume(
+    tmp_path: Path,
+    monkeypatch,
+):
+    (tmp_path / "adb.exe").write_bytes(b"adb")
+    jobs_root = tmp_path / "jobs"
+    (jobs_root / "OF-1").mkdir(parents=True)
+    evidence_root = tmp_path / "evidence"
+    policy = CampaignPolicy(
+        max_attempts_per_stage=1,
+        max_total_attempts=1,
+        max_elapsed_seconds=3600,
+        max_sanity=21,
+        sanity_costs={"OF-1": 21},
+    )
+    campaign_store = CampaignStore(evidence_root, "campaign-interrupted")
+    state = campaign_store.create(stages=["OF-1"], policy=policy)
+    state.next_candidate_index["OF-1"] = 1
+    campaign_store.begin_attempt(
+        state,
+        debug_cli.CampaignAttempt(
+            stage="OF-1",
+            job=str(tmp_path / "job.json"),
+            run_id="run-interrupted",
+            attempt_id="attempt-interrupted",
+            status="IN_FLIGHT",
+            outcome=None,
+            sanity_cost=21,
+            formal_battle_started=False,
+        ),
+    )
+    RunStore(
+        evidence_root,
+        run_id="run-interrupted",
+        attempt_id="attempt-interrupted",
+    ).update_status(
+        RunPhase.FAILED,
+        outcome="FAILED",
+        formal_battle_started=True,
+        task_execution_error=True,
+        battle_result_status="two_star",
+    )
+    monkeypatch.setattr(debug_cli, "load_roster", lambda _path: {})
+    run_stage_calls = 0
+
+    def run_stage(_config):
+        nonlocal run_stage_calls
+        run_stage_calls += 1
+        raise AssertionError("interrupted attempt must be reconciled first")
+
+    monkeypatch.setattr(debug_cli, "_run_stage", run_stage)
+    arguments = types.SimpleNamespace(
+        command="run-campaign",
+        confirm_formal_battle=True,
+        package_dir=str(tmp_path / "package"),
+        evidence_root=str(evidence_root),
+        dll=None,
+        resource_dir=None,
+        user_dir=None,
+        template_root=None,
+        state_memory_dir=None,
+        adb=str(tmp_path / "adb.exe"),
+        address="emulator-5554",
+        connect_config="General",
+        timeout=600,
+        verify_threshold=0.86,
+        stages=["OF-1"],
+        jobs_root=str(jobs_root),
+        roster=str(tmp_path / "OperBoxData.json"),
+        operbox_data=None,
+        round_name="test-campaign-interrupted",
+        campaign_id="campaign-interrupted",
+        resume_campaign=True,
+        recovery_evidence="state-memory/home",
+        max_attempts_per_stage=1,
+        max_total_attempts=1,
+        max_elapsed_seconds=3600,
+        max_sanity=21,
+        sanity_cost=["OF-1=21"],
+    )
+
+    envelope, exit_code = debug_cli._run_campaign(arguments)
+
+    assert exit_code == 2
+    assert envelope["status"] == "BUDGET_EXHAUSTED"
+    assert run_stage_calls == 0
+    assert len(envelope["data"]["attempts"]) == 1
+    assert envelope["data"]["attempts"][0]["status"] == "FAILED"
+    assert envelope["data"]["attempts"][0]["battle_result_status"] == "two_star"
+    assert envelope["data"]["sanity_spent"] == 21
+
+
 def test_campaign_status_reads_persisted_queue(
     tmp_path: Path,
     capsys,
@@ -930,7 +1338,7 @@ def test_settlement_is_captured_before_core_returns_and_conflict_is_unknown(
         @staticmethod
         def recognize(_image, **_kwargs):
             return types.SimpleNamespace(
-                name="home",
+                name="stage_detail_OF-1",
                 known=True,
                 distance=0.0,
                 confidence=1.0,
@@ -960,20 +1368,6 @@ def test_settlement_is_captured_before_core_returns_and_conflict_is_unknown(
         screenshot = {"path": str(path), "sequence": 1}
         return {"screenshot": screenshot}, [str(path)]
 
-    def fake_capture(**kwargs):
-        timeline.append("settlement-capture")
-        destination = kwargs["destination"]
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        assert cv2.imwrite(
-            str(destination),
-            np.zeros((720, 1280, 3), dtype=np.uint8),
-        )
-        return {
-            "path": str(destination),
-            "sequence": 2,
-            "captured_at": "now",
-        }
-
     events = [
         MaaEvent(
             CoreMessage.TASK_CHAIN_START,
@@ -998,8 +1392,18 @@ def test_settlement_is_captured_before_core_returns_and_conflict_is_unknown(
 
     def fake_run_copilot_file(**kwargs):
         event_sink = kwargs["event_sink"]
-        for event in events:
-            event_sink(event)
+        callback_thread = threading.Thread(
+            target=lambda: [event_sink(event) for event in events]
+        )
+        callback_thread.start()
+        callback_thread.join()
+        settlement_path = Path(kwargs["settlement_capture_path"])
+        settlement_path.parent.mkdir(parents=True, exist_ok=True)
+        assert cv2.imwrite(
+            str(settlement_path),
+            np.zeros((720, 1280, 3), dtype=np.uint8),
+        )
+        timeline.append("core-settlement-saved")
         timeline.append("core-run-returned")
         return events
 
@@ -1008,7 +1412,13 @@ def test_settlement_is_captured_before_core_returns_and_conflict_is_unknown(
     monkeypatch.setattr(debug_cli, "DeviceControlLease", FakeLease)
     monkeypatch.setattr(debug_cli, "AdbClient", FakeAdb)
     monkeypatch.setattr(debug_cli, "_snapshot_payload", fake_snapshot)
-    monkeypatch.setattr(debug_cli, "_capture_screenshot", fake_capture)
+    monkeypatch.setattr(
+        debug_cli,
+        "_capture_screenshot",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("callback thread must not capture through ADB")
+        ),
+    )
     monkeypatch.setattr(
         debug_cli,
         "VisualStateMemory",
@@ -1039,7 +1449,7 @@ def test_settlement_is_captured_before_core_returns_and_conflict_is_unknown(
     )
     envelope = json.loads(capsys.readouterr().out)
 
-    assert timeline == ["settlement-capture", "core-run-returned"]
+    assert timeline == ["core-settlement-saved", "core-run-returned"]
     assert exit_code == 2
     assert envelope["status"] == RunPhase.UNKNOWN.value
     assert envelope["data"]["verification_status"] == "conflict"
@@ -1055,3 +1465,144 @@ def test_settlement_is_captured_before_core_returns_and_conflict_is_unknown(
     assert status["status"] == RunPhase.UNKNOWN.value
     assert status["verification"]["visual_evidence"]["status"] == "two_star"
     assert status["verification"]["maa_core_evidence"][0]["score"] == 0.99
+
+
+def test_task_error_still_captures_explicit_non_three_star_result(
+    tmp_path: Path,
+    capsys,
+    monkeypatch,
+):
+    package_dir = tmp_path / "package"
+    package_dir.mkdir()
+    (package_dir / "MaaCore.dll").write_bytes(b"not a library")
+    copilot = tmp_path / "job.json"
+    copilot.write_text(
+        json.dumps({"stage_name": "OF-1", "opers": []}),
+        encoding="utf-8",
+    )
+
+    class FakeLease:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def acquire(self):
+            return None
+
+        def release(self):
+            return None
+
+    class FakeAdb:
+        def __init__(self, **_kwargs):
+            pass
+
+        def devices(self):
+            return ["emulator-5554"]
+
+    class FakeMemory:
+        @staticmethod
+        def recognize(_image, **_kwargs):
+            return types.SimpleNamespace(
+                name="stage_detail_OF-1",
+                known=True,
+                distance=0.0,
+                confidence=1.0,
+                reference_path=None,
+            )
+
+    def fake_snapshot(store, **_kwargs):
+        path = store.run_dir / "snapshots" / "preflight.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        assert cv2.imwrite(
+            str(path),
+            np.zeros((720, 1280, 3), dtype=np.uint8),
+        )
+        screenshot = {"path": str(path), "sequence": 1}
+        return {"screenshot": screenshot}, [str(path)]
+
+    events = [
+        MaaEvent(
+            CoreMessage.TASK_CHAIN_START,
+            {"taskchain": "Copilot", "taskid": 9},
+        ),
+        MaaEvent(
+            CoreMessage.TASK_CHAIN_ERROR,
+            {
+                "taskchain": "Copilot",
+                "taskid": 9,
+                "details": {"error": "NoMatch"},
+            },
+        ),
+    ]
+
+    def fake_run_copilot_file(**kwargs):
+        for event in events:
+            kwargs["event_sink"](event)
+        return events
+
+    capture_calls = []
+
+    def fake_capture(**kwargs):
+        capture_calls.append(kwargs)
+        destination = kwargs["destination"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        assert cv2.imwrite(
+            str(destination),
+            np.zeros((720, 1280, 3), dtype=np.uint8),
+        )
+        screenshot = {
+            "path": str(destination),
+            "sequence": 2,
+            "captured_at": "now",
+        }
+        verification = ResultVerification(
+            status="two_star",
+            stars=2,
+            confidence=0.98,
+            evidence=(),
+            needs_computer_use=False,
+        )
+        return verification, [screenshot]
+
+    monkeypatch.setattr(debug_cli, "_maa_version", lambda _path: "test")
+    monkeypatch.setattr(debug_cli, "_maa_processes", lambda: [])
+    monkeypatch.setattr(debug_cli, "DeviceControlLease", FakeLease)
+    monkeypatch.setattr(debug_cli, "AdbClient", FakeAdb)
+    monkeypatch.setattr(debug_cli, "_snapshot_payload", fake_snapshot)
+    monkeypatch.setattr(debug_cli, "_capture_verified_result", fake_capture)
+    monkeypatch.setattr(
+        debug_cli,
+        "VisualStateMemory",
+        types.SimpleNamespace(load=lambda *_args, **_kwargs: FakeMemory()),
+    )
+    monkeypatch.setattr(
+        debug_cli,
+        "BattleResultVerifier",
+        lambda *_args, **_kwargs: types.SimpleNamespace(),
+    )
+    monkeypatch.setattr(debug_cli, "run_copilot_file", fake_run_copilot_file)
+
+    exit_code = main(
+        [
+            "run-stage",
+            "--stage",
+            "OF-1",
+            "--copilot",
+            str(copilot),
+            "--package-dir",
+            str(package_dir),
+            "--evidence-root",
+            str(tmp_path / "evidence"),
+            "--adb",
+            sys.executable,
+            "--confirm-formal-battle",
+        ]
+    )
+    envelope = json.loads(capsys.readouterr().out)
+
+    assert exit_code == 2
+    assert len(capture_calls) == 1
+    assert capture_calls[0]["maximum_captures"] == 3
+    assert envelope["status"] == RunPhase.FAILED.value
+    assert envelope["data"]["task_execution_error"] is True
+    assert envelope["data"]["battle_result_status"] == "two_star"
+    assert envelope["data"]["formal_battle_started"] is True

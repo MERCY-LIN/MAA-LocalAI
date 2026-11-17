@@ -68,6 +68,7 @@ class OperatorRequirement:
     elite: int = 0
     level: int = 0
     skill_level: int = 0
+    module: int = -1
     module_level: int = -1
     skill: int | None = None
     requirements_declared: bool = False
@@ -83,6 +84,7 @@ class RosterOperator:
     skill_level: int
     module_level: int = -1
     skill_levels: tuple[int, ...] = ()
+    module_levels: dict[int, int] = field(default_factory=dict)
 
     def effective_skill_level(self, skill: int | None) -> int:
         if skill is not None and 1 <= skill <= len(self.skill_levels):
@@ -205,7 +207,8 @@ def _parse_requirement(payload: dict[str, Any]) -> OperatorRequirement:
         elite=int(requirements.get("elite", 0) or 0),
         level=int(requirements.get("level", 0) or 0),
         skill_level=int(requirements.get("skill_level", 0) or 0),
-        module_level=int(requirements.get("module", -1) or -1),
+        module=int(requirements.get("module", -1) or -1),
+        module_level=int(requirements.get("module_level", -1) or -1),
         skill=int(payload["skill"]) if payload.get("skill") is not None else None,
         requirements_declared=bool(requirements),
     )
@@ -237,15 +240,37 @@ def _assess_requirement(
                     f"{requirement.name}: skill {effective_skill_level} < "
                     f"{requirement.skill_level}"
                 )
-    if requirement.module_level >= 0:
-        if operator.module_level < 0:
+    if requirement.module > 0:
+        if not operator.module_levels:
             unverified.append(
-                f"{requirement.name}: module requirements unverified"
+                f"{requirement.name}: module branch requirements unverified"
+            )
+        elif requirement.module not in operator.module_levels:
+            gaps.append(
+                f"{requirement.name}: module branch {requirement.module} "
+                "is not available"
+            )
+    if requirement.module_level > 0:
+        if requirement.module > 0:
+            module_level = operator.module_levels.get(requirement.module, -1)
+            if module_level < 0:
+                unverified.append(
+                    f"{requirement.name}: module branch "
+                    f"{requirement.module} level unverified"
+                )
+            elif module_level < requirement.module_level:
+                gaps.append(
+                    f"{requirement.name}: module {requirement.module} level "
+                    f"{module_level} < {requirement.module_level}"
+                )
+        elif operator.module_level < 0:
+            unverified.append(
+                f"{requirement.name}: module level requirements unverified"
             )
         elif operator.module_level < requirement.module_level:
             gaps.append(
-                f"{requirement.name}: module {operator.module_level} < "
-                f"{requirement.module_level}"
+                f"{requirement.name}: module level "
+                f"{operator.module_level} < {requirement.module_level}"
             )
     return gaps, unverified
 

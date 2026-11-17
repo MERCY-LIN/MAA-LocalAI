@@ -7,6 +7,7 @@
 namespace asst
 {
 class MultiCopilotTaskPlugin;
+class CopilotSettlementCaptureTaskPlugin;
 class BattleProcessTask;
 class BattleFormationTask;
 class ProcessTask;
@@ -44,6 +45,7 @@ private:
     std::shared_ptr<ProcessTask> m_start_task_ptr = nullptr;
     std::shared_ptr<BattleFormationTask> m_formation_task_ptr = nullptr;
     std::shared_ptr<BattleProcessTask> m_battle_task_ptr = nullptr;
+    std::shared_ptr<CopilotSettlementCaptureTaskPlugin> m_settlement_capture_plugin_ptr = nullptr;
     std::shared_ptr<ProcessTask> m_stop_task_ptr = nullptr;
     std::string m_stage_name;
     bool m_has_subtasks_duplicate = false;

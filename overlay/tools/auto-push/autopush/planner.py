@@ -18,6 +18,14 @@ from .strategy import (
     strategy_fingerprint,
 )
 
+MODULE_NUMBER_BY_TYPE = {
+    "X": 1,
+    "Y": 2,
+    "A": 3,
+    "D": 4,
+    "B": 5,
+}
+
 
 def load_roster(path: str | Path, metrics: RoundMetrics | None = None) -> dict[str, RosterOperator]:
     if metrics is not None:
@@ -53,15 +61,37 @@ def load_roster(path: str | Path, metrics: RoundMetrics | None = None) -> dict[s
             if skill_levels
             else explicit_skill_level or main_skill_level
         )
-        equips = [
-            int(equip.get("level", 0) or 0)
-            for equip in item.get("equips", [])
-            if isinstance(equip, dict)
-        ]
-        module_level = int(
-            item.get("module_level", max(equips, default=-1))
-            if item.get("module_level") is not None
-            else max(equips, default=-1)
+        module_levels: dict[int, int] = {}
+        explicit_module_levels = item.get("module_levels")
+        if isinstance(explicit_module_levels, dict):
+            for raw_number, raw_level in explicit_module_levels.items():
+                try:
+                    number = int(raw_number)
+                    level = int(raw_level)
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= number <= 5 and level > 0:
+                    module_levels[number] = level
+        for equip in item.get("equips", []):
+            if not isinstance(equip, dict):
+                continue
+            number = MODULE_NUMBER_BY_TYPE.get(
+                str(equip.get("type", "")).strip().upper()
+            )
+            try:
+                level = int(equip.get("level", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if number is not None and level > 0:
+                module_levels[number] = max(
+                    level,
+                    module_levels.get(number, 0),
+                )
+        explicit_module_level = item.get("module_level")
+        module_level = (
+            int(explicit_module_level)
+            if explicit_module_level is not None
+            else max(module_levels.values(), default=-1)
         )
         operator = RosterOperator(
             name=str(item["name"]),
@@ -70,6 +100,7 @@ def load_roster(path: str | Path, metrics: RoundMetrics | None = None) -> dict[s
             skill_level=skill_level,
             module_level=module_level,
             skill_levels=skill_levels,
+            module_levels=module_levels,
         )
         roster[operator.name] = operator
     return roster

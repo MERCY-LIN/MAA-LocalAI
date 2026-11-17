@@ -33,3 +33,4 @@ def test_load_maa_operbox_callback(tmp_path):
     assert operator.skill_level == 10
     assert operator.effective_skill_level(1) == 10
     assert operator.module_level == 2
+    assert operator.module_levels == {2: 2}

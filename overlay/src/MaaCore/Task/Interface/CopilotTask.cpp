@@ -10,6 +10,7 @@
 #include "Task/Fight/MedicineCounterTaskPlugin.h"
 #include "Task/Miscellaneous/BattleFormationTask.h"
 #include "Task/Miscellaneous/BattleProcessTask.h"
+#include "Task/Miscellaneous/CopilotSettlementCaptureTaskPlugin.h"
 #include "Task/Miscellaneous/MultiCopilotTaskPlugin.h"
 #include "Task/ProcessTask.h"
 #include "Utils/Logger.hpp"
@@ -52,6 +53,7 @@ asst::CopilotTask::CopilotTask(const AsstCallback& callback, Assistant* inst) :
 
     m_subtasks.emplace_back(m_battle_task_ptr)->set_retry_times(0);
 
+    m_settlement_capture_plugin_ptr = m_stop_task_ptr->register_plugin<CopilotSettlementCaptureTaskPlugin>();
     m_stop_task_ptr->set_enable(false);
     m_subtasks.emplace_back(m_stop_task_ptr);
 }
@@ -79,7 +81,13 @@ bool asst::CopilotTask::set_params(const json::value& params)
         params.get("support_unit_usage", static_cast<int>(SupportUnitUsage::None))); // 助战干员使用模式
     std::string support_unit_name = params.get("support_unit_name", std::string());
     std::string operbox_data_path = params.get("operbox_data_path", std::string());  // 干员辅助编队数据路径, 为空则禁用
+    std::string settlement_capture_path =
+        params.get("settlement_capture_path", std::string());                        // 结算截图路径，为空则禁用
     bool use_operbox = !operbox_data_path.empty();
+
+    if (!settlement_capture_path.empty()) {
+        m_settlement_capture_plugin_ptr->set_output_path(utils::path(settlement_capture_path));
+    }
 
     if (use_operbox) {
         // 预检失败回调按编队缺干员协议从编队任务对象发出，GUI 侧直接复用 OperatorMissing 分支处理

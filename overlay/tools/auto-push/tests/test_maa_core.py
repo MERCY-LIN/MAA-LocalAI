@@ -123,10 +123,12 @@ def test_copilot_task_can_wait_for_settlement_through_single_multi_entry(
     tmp_path: Path,
 ):
     copilot = tmp_path / "job.json"
+    settlement = tmp_path / "settlement.png"
 
     task = build_copilot_task(
         copilot_file=copilot,
         wait_until_end=True,
+        settlement_capture_path=settlement,
     )
 
     assert "filename" not in task
@@ -137,6 +139,7 @@ def test_copilot_task_can_wait_for_settlement_through_single_multi_entry(
             "is_raid": False,
         }
     ]
+    assert task["settlement_capture_path"] == str(settlement.resolve())
 
 
 def test_copilot_task_marks_raid_mode_for_single_multi_entry(

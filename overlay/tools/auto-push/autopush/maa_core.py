@@ -539,6 +539,7 @@ def run_copilot_file(
     support_unit_usage: int = 0,
     wait_until_end: bool = False,
     is_raid: bool = False,
+    settlement_capture_path: str | Path | None = None,
     event_sink: Callable[[MaaEvent], None] | None = None,
     stop_requested: Callable[[], bool] | None = None,
 ) -> list[MaaEvent]:
@@ -556,6 +557,7 @@ def run_copilot_file(
         support_unit_usage=support_unit_usage,
         wait_until_end=wait_until_end,
         is_raid=is_raid,
+        settlement_capture_path=settlement_capture_path,
     )
     previous_priority = lower_current_process_priority()
     try:
@@ -594,6 +596,7 @@ def build_copilot_task(
     support_unit_usage: int = 0,
     wait_until_end: bool = False,
     is_raid: bool = False,
+    settlement_capture_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Build one Copilot task without starting MaaCore."""
 
@@ -620,7 +623,61 @@ def build_copilot_task(
         task["filename"] = canonical_path
     if operbox_data_path is not None:
         task["operbox_data_path"] = str(Path(operbox_data_path).resolve())
+    if settlement_capture_path is not None:
+        task["settlement_capture_path"] = str(
+            Path(settlement_capture_path).resolve()
+        )
     return task
+
+
+def run_stage_navigation(
+    *,
+    dll_path: str | Path,
+    resource_dir: str | Path,
+    user_dir: str | Path,
+    adb_path: str | Path,
+    address: str,
+    connect_config: str,
+    stage: str,
+    return_to_map: bool,
+    metrics: RoundMetrics,
+    timeout_seconds: int = 180,
+    event_sink: Callable[[MaaEvent], None] | None = None,
+    stop_requested: Callable[[], bool] | None = None,
+) -> list[MaaEvent]:
+    """Navigate through MaaCore to an exact stage-detail page."""
+
+    if not stage.strip():
+        raise ValueError("navigation stage must not be empty")
+    previous_priority = lower_current_process_priority()
+    try:
+        with DeviceControlLease(address):
+            with MaaCoreSession(
+                dll_path=dll_path,
+                resource_dir=resource_dir,
+                user_dir=user_dir,
+                metrics=metrics,
+                event_sink=event_sink,
+            ) as session:
+                session.connect(
+                    adb_path=adb_path,
+                    address=address,
+                    config=connect_config,
+                )
+                session.append_task(
+                    "StageNavigation",
+                    {
+                        "stage": stage,
+                        "return_to_map": bool(return_to_map),
+                    },
+                )
+                session.start()
+                return session.wait(
+                    timeout_seconds=timeout_seconds,
+                    stop_requested=stop_requested,
+                )
+    finally:
+        restore_current_process_priority(previous_priority)
 
 
 def run_oper_box(

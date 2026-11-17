@@ -37,6 +37,8 @@ class StageExecutionConfig:
     support_unit_usage: int = 0
     is_raid: bool = False
     confirm_formal_battle: bool = False
+    run_id: str | None = None
+    attempt_id: str | None = None
 
     @classmethod
     def from_arguments(cls, arguments: Namespace) -> StageExecutionConfig:
@@ -71,6 +73,8 @@ class StageExecutionConfig:
             confirm_formal_battle=bool(
                 getattr(arguments, "confirm_formal_battle", False)
             ),
+            run_id=getattr(arguments, "run_id", None),
+            attempt_id=getattr(arguments, "attempt_id", None),
         )
 
     def validate(self) -> None:
@@ -90,6 +94,7 @@ class StageExecutionConfig:
             raise ValueError("formation_index must be non-negative")
         if self.support_unit_usage not in {0, 1, 2}:
             raise ValueError("support_unit_usage must be 0, 1, or 2")
+
     def to_namespace(self) -> Namespace:
         """Return the legacy namespace consumed by the debug runner."""
 

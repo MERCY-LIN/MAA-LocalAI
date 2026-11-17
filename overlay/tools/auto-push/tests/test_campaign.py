@@ -79,6 +79,53 @@ def test_campaign_state_persists_attempts_and_recovery_gate(tmp_path: Path):
     assert events[-1]["type"] == "test-event"
 
 
+def test_campaign_reserves_attempt_and_sanity_before_battle(tmp_path: Path):
+    store = CampaignStore(tmp_path, "campaign-reservation")
+    state = store.create(
+        stages=["OF-1"],
+        policy=CampaignPolicy(
+            sanity_costs={"OF-1": 21},
+            max_sanity=21,
+        ),
+    )
+
+    store.begin_attempt(
+        state,
+        CampaignAttempt(
+            stage="OF-1",
+            job="job.json",
+            run_id="run-reserved",
+            attempt_id="attempt-reserved",
+            status="IN_FLIGHT",
+            outcome=None,
+            sanity_cost=21,
+            formal_battle_started=False,
+        ),
+    )
+
+    loaded = store.load()
+    assert len(loaded.attempts) == 1
+    assert loaded.in_flight_attempt is not None
+    assert loaded.in_flight_attempt.attempt_id == "attempt-reserved"
+    assert loaded.sanity_spent == 21
+
+    finished = store.finish_attempt(
+        loaded,
+        "attempt-reserved",
+        status="FAILED",
+        outcome="FAILED",
+        sanity_cost=21,
+        formal_battle_started=True,
+        task_execution_error=True,
+        battle_result_status="two_star",
+    )
+
+    assert finished.finished_at is not None
+    assert loaded.in_flight_attempt is None
+    assert loaded.sanity_spent == 21
+    assert store.load().attempts[0].battle_result_status == "two_star"
+
+
 def test_parse_sanity_costs_is_strict():
     assert parse_sanity_costs(["OF-1=21", "OF-2=18"]) == {
         "OF-1": 21,

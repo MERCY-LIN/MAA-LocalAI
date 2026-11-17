@@ -6,7 +6,7 @@ import json
 import os
 import threading
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -83,7 +83,9 @@ class CampaignAttempt:
     outcome: str | None
     sanity_cost: int
     formal_battle_started: bool
-    finished_at: str
+    finished_at: str | None = None
+    task_execution_error: bool = False
+    battle_result_status: str | None = None
 
 
 @dataclass
@@ -110,6 +112,17 @@ class CampaignState:
     def attempts_for_stage(self, stage: str) -> int:
         return sum(attempt.stage == stage for attempt in self.attempts)
 
+    @property
+    def in_flight_attempt(self) -> CampaignAttempt | None:
+        return next(
+            (
+                attempt
+                for attempt in self.attempts
+                if attempt.status == "IN_FLIGHT"
+            ),
+            None,
+        )
+
     def elapsed_seconds(self, now: datetime | None = None) -> float:
         current = now or datetime.now(UTC)
         return max(0.0, (current - datetime.fromisoformat(self.started_at)).total_seconds())
@@ -133,6 +146,57 @@ class CampaignState:
         self.attempts.append(attempt)
         self.sanity_spent += attempt.sanity_cost
         self.updated_at = utc_now()
+
+    def begin_attempt(self, attempt: CampaignAttempt) -> None:
+        """Persist and budget an attempt before any formal battle work."""
+
+        if attempt.status != "IN_FLIGHT":
+            raise CampaignError("new campaign attempts must be IN_FLIGHT")
+        if self.in_flight_attempt is not None:
+            raise CampaignError("campaign already has an in-flight attempt")
+        if attempt.formal_battle_started:
+            raise CampaignError("an in-flight attempt cannot start in battle")
+        self.attempts.append(attempt)
+        self.sanity_spent += attempt.sanity_cost
+        self.updated_at = utc_now()
+
+    def finish_attempt(
+        self,
+        attempt_id: str,
+        *,
+        status: str,
+        outcome: str | None,
+        sanity_cost: int,
+        formal_battle_started: bool,
+        task_execution_error: bool = False,
+        battle_result_status: str | None = None,
+    ) -> CampaignAttempt:
+        """Finish the one in-flight attempt and reconcile its reservation."""
+
+        for index, attempt in enumerate(self.attempts):
+            if attempt.attempt_id != attempt_id:
+                continue
+            if attempt.status != "IN_FLIGHT":
+                raise CampaignError("campaign attempt is already finished")
+            if sanity_cost < 0:
+                raise CampaignError("campaign attempt sanity cost is negative")
+            finished = replace(
+                attempt,
+                status=status,
+                outcome=outcome,
+                sanity_cost=sanity_cost,
+                formal_battle_started=formal_battle_started,
+                finished_at=utc_now(),
+                task_execution_error=task_execution_error,
+                battle_result_status=battle_result_status,
+            )
+            self.sanity_spent += sanity_cost - attempt.sanity_cost
+            if self.sanity_spent < 0:
+                raise CampaignError("campaign sanity reconciliation went negative")
+            self.attempts[index] = finished
+            self.updated_at = utc_now()
+            return finished
+        raise CampaignError(f"campaign in-flight attempt not found: {attempt_id}")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -232,10 +296,26 @@ class CampaignStore:
             raise CampaignError("campaign stage index is out of range")
         if state.sanity_spent < 0:
             raise CampaignError("campaign sanity spent must be non-negative")
+        if any(attempt.sanity_cost < 0 for attempt in state.attempts):
+            raise CampaignError("campaign attempt sanity cost must be non-negative")
+        if sum(attempt.sanity_cost for attempt in state.attempts) != state.sanity_spent:
+            raise CampaignError(
+                "campaign sanity spent does not match attempt reservations"
+            )
         if any(index < 0 for index in state.next_candidate_index.values()):
             raise CampaignError("campaign candidate index must be non-negative")
         if len(state.attempts) > state.policy.max_total_attempts:
             raise CampaignError("campaign attempt count exceeds policy")
+        if sum(
+            attempt.status == "IN_FLIGHT" for attempt in state.attempts
+        ) > 1:
+            raise CampaignError("campaign has multiple in-flight attempts")
+        if any(
+            attempt.status == "IN_FLIGHT"
+            and attempt.finished_at is not None
+            for attempt in state.attempts
+        ):
+            raise CampaignError("campaign in-flight attempt has a finish time")
         try:
             datetime.fromisoformat(state.started_at)
             datetime.fromisoformat(state.updated_at)
@@ -254,6 +334,49 @@ class CampaignStore:
     def record_attempt(self, state: CampaignState, attempt: CampaignAttempt) -> None:
         state.record_attempt(attempt)
         self.save(state)
+
+    def begin_attempt(
+        self,
+        state: CampaignState,
+        attempt: CampaignAttempt,
+    ) -> None:
+        state.begin_attempt(attempt)
+        self.save(state)
+
+    def finish_attempt(
+        self,
+        state: CampaignState,
+        attempt_id: str,
+        **fields: Any,
+    ) -> CampaignAttempt:
+        finished = state.finish_attempt(attempt_id, **fields)
+        self.save(state)
+        return finished
+
+    def update_in_flight_attempt(
+        self,
+        state: CampaignState,
+        *,
+        status: str,
+        outcome: str | None,
+        sanity_cost: int,
+        formal_battle_started: bool,
+        task_execution_error: bool = False,
+        battle_result_status: str | None = None,
+    ) -> CampaignAttempt:
+        pending = state.in_flight_attempt
+        if pending is None or pending.attempt_id is None:
+            raise CampaignError("campaign has no linked in-flight attempt")
+        return self.finish_attempt(
+            state,
+            pending.attempt_id,
+            status=status,
+            outcome=outcome,
+            sanity_cost=sanity_cost,
+            formal_battle_started=formal_battle_started,
+            task_execution_error=task_execution_error,
+            battle_result_status=battle_result_status,
+        )
 
     def append_event(
         self,

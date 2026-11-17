@@ -63,6 +63,9 @@ def test_device_lease_is_exclusive_across_processes():
         if process.poll() is None:
             process.kill()
             process.wait(timeout=5)
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None and not stream.closed:
+                stream.close()
 
     recovered = DeviceControlLease(address, timeout_seconds=2)
     recovered.acquire()

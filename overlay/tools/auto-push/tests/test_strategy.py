@@ -198,3 +198,75 @@ def test_hard_elite_gap_is_detected_from_diagnostics():
     )
 
     assert candidate_has_hard_elite_gap(candidate)
+
+
+def test_module_number_and_module_level_are_checked_separately():
+    strategy = CopilotStrategy.from_dict(
+        {
+            "stage_name": "act55side_08",
+            "opers": [
+                {
+                    "name": "A",
+                    "requirements": {
+                        "module": 2,
+                        "module_level": 3,
+                    },
+                }
+            ],
+            "actions": [],
+        }
+    )
+    wrong_high_level_branch = {
+        "A": RosterOperator(
+            "A",
+            elite=2,
+            level=90,
+            skill_level=10,
+            module_level=3,
+            module_levels={3: 3},
+        )
+    }
+
+    wrong = evaluate_strategy(
+        strategy,
+        wrong_high_level_branch,
+        allow_support=False,
+    )
+
+    assert wrong.status == "degraded"
+    assert any("module branch 2" in item for item in wrong.diagnostics)
+
+    matching_branch_low_level = {
+        "A": RosterOperator(
+            "A",
+            elite=2,
+            level=90,
+            skill_level=10,
+            module_level=2,
+            module_levels={2: 2},
+        )
+    }
+    low = evaluate_strategy(
+        strategy,
+        matching_branch_low_level,
+        allow_support=False,
+    )
+
+    assert low.status == "degraded"
+    assert any("module 2 level 2 < 3" in item for item in low.diagnostics)
+
+    matching = evaluate_strategy(
+        strategy,
+        {
+            "A": RosterOperator(
+                "A",
+                elite=2,
+                level=90,
+                skill_level=10,
+                module_level=3,
+                module_levels={2: 3},
+            )
+        },
+        allow_support=False,
+    )
+    assert matching.status == "ready"

@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 import subprocess
-import threading
 import time
 import urllib.parse
 import urllib.request
@@ -37,6 +36,7 @@ from .evidence import (
     classify_outcome,
     ensure_no_active_run,
     find_run_store,
+    new_attempt_id,
     new_run_id,
     process_is_running,
     read_json,
@@ -48,8 +48,8 @@ from .maa_core import (
     MaaCoreError,
     MaaEvent,
     MaaCoreLibrary,
-    event_has_three_star_result,
     run_copilot_file,
+    run_stage_navigation,
     summarize_events,
 )
 from .metrics import BudgetExceeded, BudgetLimits, RoundMetrics, TestResult
@@ -70,7 +70,6 @@ from .strategy import (
 )
 from .verifier import (
     BattleResultVerifier,
-    ResultVerification,
     resolve_battle_evidence,
 )
 
@@ -109,6 +108,11 @@ SAFE_POST_STOP_STATES = {
     "terminal_protocol",
 }
 TARGET_STAGE_DETAIL_PREFIX = "stage_detail_"
+NAVIGABLE_PREFLIGHT_STATES = {
+    "event_map",
+    "home",
+    "terminal_protocol",
+}
 
 
 def _is_safe_preflight_state(state_name: str, stage: str) -> bool:
@@ -125,6 +129,40 @@ def _is_safe_post_stop_state(state_name: str, stage: str) -> bool:
         state_name in SAFE_POST_STOP_STATES
         or state_name == f"{TARGET_STAGE_DETAIL_PREFIX}{stage}"
     )
+
+
+def _preflight_transition(
+    state_name: str,
+    stage: str,
+) -> tuple[str, bool]:
+    """Return the required transition and whether to leave a stage detail."""
+
+    if state_name == f"{TARGET_STAGE_DETAIL_PREFIX}{stage}":
+        return ("ready", False)
+    if state_name in NAVIGABLE_PREFLIGHT_STATES:
+        return ("navigate", False)
+    if state_name.startswith(TARGET_STAGE_DETAIL_PREFIX):
+        return ("navigate", True)
+    return ("blocked", False)
+
+
+def _stage_navigation_name(package_dir: Path, stage: str) -> str:
+    """Resolve an internal stage id to the display code used by navigation."""
+
+    tile_dir = package_dir / "resource" / "Arknights-Tile-Pos"
+    if tile_dir.is_dir():
+        candidates = sorted(
+            path
+            for path in tile_dir.glob("*.json")
+            if path.name.startswith(f"{stage}-")
+        )
+        candidates.sort(key=lambda path: "#f#" in path.name)
+        for path in candidates:
+            payload = read_json(path) or {}
+            code = payload.get("code")
+            if isinstance(code, str) and code.strip():
+                return code.strip()
+    return stage
 
 
 def _resolve(value: str | None, default: Path) -> Path:
@@ -476,6 +514,33 @@ def _capture_screenshot(
     }
 
 
+def _saved_screenshot_payload(
+    path: Path,
+    *,
+    timing: str,
+) -> tuple[dict[str, Any], Any]:
+    """Load a screenshot saved synchronously by the MaaCore task plugin."""
+
+    payload = path.read_bytes()
+    image = decode_png(payload)
+    stat = path.stat()
+    screenshot = {
+        "path": str(path.resolve()),
+        "width": int(image.shape[1]),
+        "height": int(image.shape[0]),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "sequence": None,
+        "action_sequence": None,
+        "captured_at": datetime.fromtimestamp(
+            stat.st_mtime,
+            tz=UTC,
+        ).isoformat(),
+        "cache_hit": False,
+        "timing": timing,
+    }
+    return screenshot, image
+
+
 def _capture_verified_result(
     *,
     adb_path: Path,
@@ -522,26 +587,6 @@ def _capture_verified_result(
         if verification.status != "unknown":
             break
     return verification, screenshots
-
-
-def _capture_single_result(
-    *,
-    adb_path: Path,
-    address: str,
-    destination: Path,
-    metrics: RoundMetrics,
-    verifier: BattleResultVerifier,
-) -> tuple[dict[str, Any], ResultVerification]:
-    screenshot = _capture_screenshot(
-        adb_path=adb_path,
-        address=address,
-        destination=destination,
-        metrics=metrics,
-    )
-    image = cv2.imread(str(destination), cv2.IMREAD_COLOR)
-    if image is None:
-        raise ValueError("unable to decode settlement screenshot")
-    return screenshot, verifier.verify(image, metrics=metrics)
 
 
 def _formation_from_copilot(path: Path | None) -> dict[str, Any]:
@@ -858,7 +903,11 @@ def _run_stage(
     )
 
     ensure_no_active_run(evidence_root)
-    store = RunStore(evidence_root)
+    store = RunStore(
+        evidence_root,
+        run_id=getattr(arguments, "run_id", None),
+        attempt_id=getattr(arguments, "attempt_id", None),
+    )
     store.mark_active()
     artifacts: list[str] = [
         str(store.manifest_path),
@@ -1018,7 +1067,7 @@ def _run_stage(
                 ),
                 2,
             )
-        preflight_payload = {
+        initial_preflight_payload = {
             "name": preflight_state.name,
             "known": preflight_state.known,
             "distance": preflight_state.distance,
@@ -1029,13 +1078,149 @@ def _run_stage(
                 else None
             ),
         }
+        transition, return_to_map = _preflight_transition(
+            preflight_state.name if preflight_state.known else "unknown",
+            arguments.stage,
+        )
+        navigation_summary: dict[str, Any] | None = None
+        if transition == "navigate":
+            navigation_name = _stage_navigation_name(
+                package_dir,
+                arguments.stage,
+            )
+            store.append_step(
+                name="stage-navigation",
+                preconditions={
+                    "initial_state": initial_preflight_payload,
+                    "return_to_map": return_to_map,
+                },
+                action=(
+                    "use MaaCore to return to the map, navigate the next "
+                    "stage, and stop on its detail page"
+                ),
+                postconditions={"target_detail_required": arguments.stage},
+                timeout_seconds=180,
+                evidence={"navigation_name": navigation_name},
+            )
+            try:
+                navigation_events = run_stage_navigation(
+                    dll_path=dll_path,
+                    resource_dir=resource_dir,
+                    user_dir=user_dir,
+                    adb_path=adb_path,
+                    address=arguments.address,
+                    connect_config=arguments.connect_config,
+                    stage=navigation_name,
+                    return_to_map=return_to_map,
+                    metrics=metrics,
+                    timeout_seconds=min(180, arguments.timeout),
+                    event_sink=lambda event: _write_maa_event(store, event),
+                    stop_requested=store.stop_requested,
+                )
+                navigation_summary = summarize_events(navigation_events)
+            except Exception as exception:
+                store.update_status(
+                    RunPhase.UNKNOWN,
+                    completed_at=utc_now(),
+                    outcome="BLOCKED_STAGE_NAVIGATION",
+                    navigation_error=str(exception),
+                    safe_exit_verified=False,
+                    formal_battle_started=False,
+                )
+                store.append_event(
+                    "stage_navigation_failed",
+                    {"stage": arguments.stage, "error": str(exception)},
+                )
+                return (
+                    result_envelope(
+                        "run-stage",
+                        "BLOCKED",
+                        run_id=store.run_id,
+                        attempt_id=store.attempt_id,
+                        data={
+                            "stage": arguments.stage,
+                            "outcome": "BLOCKED_STAGE_NAVIGATION",
+                            "formal_battle_started": False,
+                            "initial_preflight_state": initial_preflight_payload,
+                        },
+                        errors=[str(exception)],
+                        artifacts=artifacts,
+                    ),
+                    2,
+                )
+            if navigation_summary["terminal_state"] != "COMPLETED":
+                reason = (
+                    "MaaCore stage navigation did not complete: "
+                    f"{navigation_summary['terminal_state']}"
+                )
+                store.update_status(
+                    RunPhase.UNKNOWN,
+                    completed_at=utc_now(),
+                    outcome="BLOCKED_STAGE_NAVIGATION",
+                    navigation_error=reason,
+                    safe_exit_verified=False,
+                    formal_battle_started=False,
+                )
+                store.append_event(
+                    "stage_navigation_failed",
+                    {"stage": arguments.stage, "error": reason},
+                )
+                return (
+                    result_envelope(
+                        "run-stage",
+                        "BLOCKED",
+                        run_id=store.run_id,
+                        attempt_id=store.attempt_id,
+                        data={
+                            "stage": arguments.stage,
+                            "outcome": "BLOCKED_STAGE_NAVIGATION",
+                            "formal_battle_started": False,
+                            "navigation": navigation_summary,
+                        },
+                        errors=[reason],
+                        artifacts=artifacts,
+                    ),
+                    2,
+                )
+
+            screenshot, navigation_artifacts = _snapshot_payload(
+                store,
+                package_dir=package_dir,
+                dll_path=dll_path,
+                adb_path=adb_path,
+                address=arguments.address,
+                copilot_path=copilot_path,
+                label="preflight-after-navigation",
+                metrics=metrics,
+            )
+            artifacts.extend(navigation_artifacts)
+            preflight_image_payload = _snapshot_image(screenshot)
+            preflight_image = cv2.imread(
+                preflight_image_payload["path"],
+                cv2.IMREAD_COLOR,
+            )
+            if preflight_image is None:
+                raise ValueError("unable to decode post-navigation screenshot")
+            preflight_state = memory.recognize(preflight_image, metrics=metrics)
+        preflight_payload = {
+            "name": preflight_state.name,
+            "known": preflight_state.known,
+            "distance": preflight_state.distance,
+            "confidence": preflight_state.confidence,
+            "reference": (
+                str(preflight_state.reference_path)
+                if preflight_state.reference_path
+                else None
+            ),
+            "initial": initial_preflight_payload,
+            "transition": transition,
+            "navigation": navigation_summary,
+        }
         store.append_event("preflight_state_recognized", preflight_payload)
         preflight_safe = (
             preflight_state.known
-            and _is_safe_preflight_state(
-                preflight_state.name,
-                arguments.stage,
-            )
+            and preflight_state.name
+            == f"{TARGET_STAGE_DETAIL_PREFIX}{arguments.stage}"
         )
         store.append_step(
             name="preflight",
@@ -1062,10 +1247,8 @@ def _run_stage(
         )
         if (
             not preflight_state.known
-            or not _is_safe_preflight_state(
-                preflight_state.name,
-                arguments.stage,
-            )
+            or preflight_state.name
+            != f"{TARGET_STAGE_DETAIL_PREFIX}{arguments.stage}"
         ):
             store.update_status(
                 RunPhase.UNKNOWN,
@@ -1086,7 +1269,7 @@ def _run_stage(
                         "preflight_state": preflight_payload,
                         "reason": (
                             "formal battle was not started because the current "
-                            "state is unknown or not in the safe preflight set"
+                            "state is not the exact target stage-detail page"
                         ),
                     },
                     errors=[
@@ -1096,113 +1279,31 @@ def _run_stage(
                 ),
                 2,
             )
-        store.update_status(RunPhase.RUNNING, safe_exit_verified=False)
-        formal_battle_started = True
+        store.update_status(
+            RunPhase.PREPARING,
+            safe_exit_verified=False,
+            formal_battle_started=False,
+        )
         verifier = BattleResultVerifier(
             template_root,
             threshold=arguments.verify_threshold,
         )
-        settlement_capture: dict[str, Any] = {}
-        settlement_lock = threading.Lock()
+        settlement_path = (
+            store.run_dir / "artifacts" / "settlement-at-core-star.png"
+        )
 
-        def capture_core_settlement(event: MaaEvent) -> None:
+        def record_core_event(event: MaaEvent) -> None:
+            nonlocal formal_battle_started
             _write_maa_event(store, event)
-            if not event_has_three_star_result(event):
-                return
-            with settlement_lock:
-                if settlement_capture.get("attempted"):
-                    return
-                settlement_capture["attempted"] = True
-                destination = (
-                    store.run_dir / "artifacts" / "settlement-at-core-star.png"
-                )
-                try:
-                    screenshot, captured_verification = _capture_single_result(
-                        adb_path=adb_path,
-                        address=arguments.address,
-                        destination=destination,
-                        metrics=metrics,
-                        verifier=verifier,
-                    )
-                except (AdbError, OSError, ValueError) as exception:
-                    settlement_capture["error"] = str(exception)
-                    store.append_step(
-                        name="settlement-capture",
-                        preconditions={
-                            "maa_core_three_star_callback": True,
-                            "capture_slot_available": True,
-                        },
-                        action=(
-                            "capture and recognize settlement before Core "
-                            "leaves the result screen"
-                        ),
-                        postconditions={
-                            "screenshot_saved": False,
-                            "recognition_status": "unknown",
-                        },
-                        timeout_seconds=0,
-                        evidence={"timing": "maa_core_three_star_callback"},
-                        failure=str(exception),
-                    )
-                    store.append_event(
-                        "settlement_capture_failed",
-                        {
-                            "timing": "maa_core_three_star_callback",
-                            "error": str(exception),
-                        },
-                    )
-                    return
-                settlement_capture.update(
-                    {
-                        "screenshot": screenshot,
-                        "verification": captured_verification,
-                    }
-                )
-                evidence_path = (
-                    store.run_dir
-                    / "artifacts"
-                    / "settlement-at-core-star-verification.json"
-                )
-                write_json_atomic(
-                    evidence_path,
-                    {
-                        "schema_version": "localai.debug/v1",
-                        "run_id": store.run_id,
-                        "attempt_id": store.attempt_id,
-                        "timing": "maa_core_three_star_callback",
-                        "screenshot": screenshot,
-                        "verification": asdict(captured_verification),
-                    },
-                )
-                store.append_step(
-                    name="settlement-capture",
-                    preconditions={
-                        "maa_core_three_star_callback": True,
-                        "capture_slot_available": True,
-                    },
-                    action=(
-                        "capture and recognize settlement before Core leaves "
-                        "the result screen"
-                    ),
-                    postconditions={
-                        "screenshot_saved": True,
-                        "recognition_status": captured_verification.status,
-                    },
-                    timeout_seconds=0,
-                    evidence={
-                        "timing": "maa_core_three_star_callback",
-                        "screenshot": screenshot,
-                        "verification_path": str(evidence_path.resolve()),
-                    },
-                )
-                store.append_event(
-                    "settlement_captured",
-                    {
-                        "timing": "maa_core_three_star_callback",
-                        "screenshot": screenshot,
-                        "verification": asdict(captured_verification),
-                        "evidence_path": str(evidence_path.resolve()),
-                    },
+            if (
+                event.message_name == "TASK_CHAIN_START"
+                and event.task_chain == "Copilot"
+            ):
+                formal_battle_started = True
+                store.update_status(
+                    RunPhase.RUNNING,
+                    safe_exit_verified=False,
+                    formal_battle_started=True,
                 )
 
         events = run_copilot_file(
@@ -1224,25 +1325,84 @@ def _run_stage(
             support_unit_usage=arguments.support_unit_usage,
             wait_until_end=True,
             is_raid=arguments.is_raid,
-            event_sink=capture_core_settlement,
+            settlement_capture_path=settlement_path,
+            event_sink=record_core_event,
             stop_requested=store.stop_requested,
+        )
+        formal_battle_started = formal_battle_started or any(
+            event.message_name == "TASK_CHAIN_START" for event in events
         )
         summary = summarize_events(events)
         result_path = store.run_dir / "artifacts" / "result.png"
-        verification = settlement_capture.get("verification")
-        capture_error: str | None = settlement_capture.get("error")
-        result_image = settlement_capture.get("screenshot")
-        if result_image is not None:
-            artifacts.extend(
-                [
-                    str(result_image["path"]),
-                    str(
-                        store.run_dir
-                        / "artifacts"
-                        / "settlement-at-core-star-verification.json"
+        verification = None
+        capture_error: str | None = None
+        result_image: dict[str, Any] | None = None
+        if settlement_path.is_file():
+            try:
+                result_image, decoded_settlement = _saved_screenshot_payload(
+                    settlement_path,
+                    timing="maa_core_synchronous_task_plugin",
+                )
+                verification = verifier.verify(
+                    decoded_settlement,
+                    metrics=metrics,
+                )
+            except (OSError, ValueError) as exception:
+                capture_error = str(exception)
+                result_image = None
+            else:
+                evidence_path = (
+                    store.run_dir
+                    / "artifacts"
+                    / "settlement-at-core-star-verification.json"
+                )
+                write_json_atomic(
+                    evidence_path,
+                    {
+                        "schema_version": "localai.debug/v1",
+                        "run_id": store.run_id,
+                        "attempt_id": store.attempt_id,
+                        "timing": "maa_core_synchronous_task_plugin",
+                        "screenshot": result_image,
+                        "verification": asdict(verification),
+                    },
+                )
+                store.append_step(
+                    name="settlement-capture",
+                    preconditions={
+                        "maa_core_star_task_started": True,
+                        "device_capture_owner": "maa_core_task_thread",
+                    },
+                    action=(
+                        "MaaCore synchronously saves the matched settlement "
+                        "frame before advancing the task chain"
                     ),
-                ]
-            )
+                    postconditions={
+                        "screenshot_saved": True,
+                        "recognition_status": verification.status,
+                    },
+                    timeout_seconds=0,
+                    evidence={
+                        "timing": "maa_core_synchronous_task_plugin",
+                        "screenshot": result_image,
+                        "verification_path": str(evidence_path.resolve()),
+                    },
+                )
+                store.append_event(
+                    "settlement_captured",
+                    {
+                        "timing": "maa_core_synchronous_task_plugin",
+                        "screenshot": result_image,
+                        "verification": asdict(verification),
+                        "evidence_path": str(evidence_path.resolve()),
+                    },
+                )
+                artifacts.extend(
+                    [
+                        str(settlement_path.resolve()),
+                        str(evidence_path.resolve()),
+                    ]
+                )
         stop_requested = store.stop_requested()
         safe_exit_verified = False
         post_stop_payload: dict[str, Any] | None = None
@@ -1319,11 +1479,13 @@ def _run_stage(
                     evidence={},
                     failure=str(exception),
                 )
-        can_verify = (
+        task_execution_error = bool(
+            summary["task_errors"] or summary["connection_errors"]
+        )
+        can_capture = (
             not stop_requested
-            and summary["terminal_state"] == "COMPLETED"
-            and not summary["task_errors"]
-            and not summary["connection_errors"]
+            and formal_battle_started
+            and summary["terminal_state"] not in {"STOPPED", "DISCONNECTED"}
         )
         store.append_step(
             name="formal-battle",
@@ -1351,30 +1513,31 @@ def _run_stage(
                 else summary["terminal_state"]
             ),
         )
-        if can_verify:
+        if can_capture and verification is None:
             store.update_status(RunPhase.VERIFYING, task=summary)
-            if verification is None:
-                try:
-                    verification, result_screenshots = _capture_verified_result(
-                        adb_path=adb_path,
-                        address=arguments.address,
-                        destination=result_path,
-                        metrics=metrics,
-                        verifier=verifier,
-                    )
-                    result_image = result_screenshots[-1]
-                    artifacts.extend(
-                        item["path"] for item in result_screenshots
-                    )
-                except (AdbError, OSError, ValueError) as exception:
-                    capture_error = str(exception)
-                    result_image = None
-        elif summary["terminal_state"] == "STOPPED" or stop_requested:
+            try:
+                verification, result_screenshots = _capture_verified_result(
+                    adb_path=adb_path,
+                    address=arguments.address,
+                    destination=result_path,
+                    metrics=metrics,
+                    verifier=verifier,
+                    maximum_captures=3 if task_execution_error else 10,
+                    interval_seconds=1.0 if task_execution_error else 6.0,
+                )
+                result_image = result_screenshots[-1]
+                artifacts.extend(item["path"] for item in result_screenshots)
+            except (AdbError, OSError, ValueError) as exception:
+                capture_error = str(exception)
+                result_image = None
+        if summary["terminal_state"] == "STOPPED" or stop_requested:
             store.update_status(RunPhase.STOPPING, task=summary)
         elif summary["terminal_state"] == "DISCONNECTED":
             store.update_status(RunPhase.FAILED, task=summary)
-        elif summary["task_errors"]:
+        elif task_execution_error:
             store.update_status(RunPhase.FAILED, task=summary)
+        elif summary["terminal_state"] == "COMPLETED":
+            store.update_status(RunPhase.VERIFYING, task=summary)
         else:
             store.update_status(RunPhase.UNKNOWN, task=summary)
 
@@ -1477,6 +1640,8 @@ def _run_stage(
             "verification_conflict": resolution.conflict,
             "verification_reason": resolution.reason,
             "formal_battle_started": formal_battle_started,
+            "task_execution_error": task_execution_error,
+            "battle_result_status": verification_status,
             "capture_error": capture_error,
             "result_screenshot": result_image,
             "stop_requested": stop_requested,
@@ -1497,6 +1662,9 @@ def _run_stage(
             task=summary,
             verification=verification_payload,
             preflight_state=preflight_payload,
+            formal_battle_started=formal_battle_started,
+            task_execution_error=task_execution_error,
+            battle_result_status=verification_status,
             result_screenshot=(
                 result_image.get("path")
                 if isinstance(result_image, dict)
@@ -1537,6 +1705,9 @@ def _run_stage(
             outcome="FAILED_RUNTIME",
             errors=[str(exception)],
             safe_exit_verified=False,
+            formal_battle_started=formal_battle_started,
+            task_execution_error=True,
+            battle_result_status="unknown",
         )
         store.append_event(
             "run_runtime_error",
@@ -1737,11 +1908,12 @@ def _replay(arguments: argparse.Namespace) -> tuple[dict[str, Any], int]:
     evidence_root = _resolve(arguments.evidence_root, _default_evidence_root())
     store = find_run_store(evidence_root, run_id=arguments.run_id)
     status = read_json(store.status_path) or {}
-    image_path = (
-        Path(arguments.image).expanduser().resolve()
-        if arguments.image
-        else store.run_dir / "artifacts" / "result.png"
-    )
+    if arguments.image:
+        image_path = Path(arguments.image).expanduser().resolve()
+    elif isinstance(status.get("result_screenshot"), str):
+        image_path = Path(str(status["result_screenshot"])).expanduser().resolve()
+    else:
+        image_path = store.run_dir / "artifacts" / "result.png"
     if not image_path.is_file():
         raise EvidenceError(f"replay screenshot not found: {image_path}")
     image = cv2.imread(str(image_path), cv2.IMREAD_COLOR)
@@ -1892,6 +2064,130 @@ def _campaign_policy(arguments: argparse.Namespace) -> CampaignPolicy:
     )
 
 
+def _reconcile_campaign_checkpoint(
+    state: CampaignState,
+    store: CampaignStore,
+    *,
+    evidence_root: Path,
+) -> bool:
+    """Reconcile one pre-battle reservation before any new stage starts."""
+
+    pending = state.in_flight_attempt
+    if pending is None:
+        return True
+    if pending.run_id is None or pending.attempt_id is None:
+        raise CampaignError("in-flight campaign attempt is not linked to a run")
+
+    run_dir = evidence_root / pending.run_id
+    run_status = read_json(run_dir / "status.json") or {}
+    if not run_status:
+        store.finish_attempt(
+            state,
+            pending.attempt_id,
+            status="UNKNOWN",
+            outcome="INTERRUPTED_UNVERIFIED",
+            sanity_cost=pending.sanity_cost,
+            formal_battle_started=False,
+            task_execution_error=True,
+            battle_result_status="unknown",
+        )
+        state.pause(
+            "interrupted attempt has no persisted run status; sanity "
+            "reservation was retained and recovery evidence is required"
+        )
+        store.append_event(
+            "campaign_attempt_reconciled",
+            {
+                "attempt_id": pending.attempt_id,
+                "run_id": pending.run_id,
+                "status": "UNKNOWN",
+                "sanity_reserved": pending.sanity_cost,
+            },
+        )
+        return False
+
+    active = read_json(evidence_root / ACTIVE_RUN_FILE) or {}
+    active_pid = active.get("pid")
+    if (
+        active.get("run_id") == pending.run_id
+        and isinstance(active_pid, int)
+        and process_is_running(active_pid)
+    ):
+        raise CampaignError(
+            f"interrupted campaign attempt is still active: {pending.run_id}"
+        )
+
+    phase = str(run_status.get("status") or "UNKNOWN")
+    outcome = run_status.get("outcome")
+    formal_battle_started = bool(
+        run_status.get("formal_battle_started")
+    )
+    task_execution_error = bool(
+        run_status.get("task_execution_error") or run_status.get("task_errors")
+    )
+    battle_result_status = run_status.get("battle_result_status")
+    if not isinstance(battle_result_status, str):
+        verification = run_status.get("verification")
+        battle_result_status = (
+            verification.get("status")
+            if isinstance(verification, dict)
+            else "unknown"
+        )
+    explicitly_not_started = (
+        not formal_battle_started
+        and (
+            phase == "BLOCKED"
+            or str(outcome or "").startswith("BLOCKED_")
+        )
+    )
+    sanity_cost = 0 if explicitly_not_started else pending.sanity_cost
+    store.finish_attempt(
+        state,
+        pending.attempt_id,
+        status=phase,
+        outcome=str(outcome) if outcome is not None else None,
+        sanity_cost=sanity_cost,
+        formal_battle_started=formal_battle_started,
+        task_execution_error=task_execution_error,
+        battle_result_status=battle_result_status,
+    )
+    if phase == "SUCCEEDED" and pending.stage == state.current_stage:
+        state.stage_index += 1
+        state.next_candidate_index[pending.stage] = 0
+
+    explicitly_resolved = (
+        phase in {"SUCCEEDED", "FAILED", "STOPPED"}
+        and (
+            phase == "SUCCEEDED"
+            or battle_result_status
+            in {"three_star", "two_star", "non_three_star"}
+            or phase == "STOPPED"
+        )
+    )
+    if not formal_battle_started and phase in {"BLOCKED", "FAILED", "UNKNOWN"}:
+        explicitly_resolved = True
+    state.pause(
+        "reconciled interrupted attempt "
+        f"run_id={pending.run_id} status={phase} "
+        f"result={battle_result_status or 'unknown'}; recovery evidence "
+        "is required before another formal battle"
+    )
+    store.append_event(
+        "campaign_attempt_reconciled",
+        {
+            "attempt_id": pending.attempt_id,
+            "run_id": pending.run_id,
+            "status": phase,
+            "outcome": outcome,
+            "formal_battle_started": formal_battle_started,
+            "battle_result_status": battle_result_status,
+            "sanity_cost": sanity_cost,
+            "safe_to_continue": explicitly_resolved,
+        },
+    )
+    return explicitly_resolved
+
+
 def _campaign_envelope(
     state: CampaignState,
     store: CampaignStore,
@@ -2001,7 +2297,41 @@ def _run_campaign(
                 status=state.status,
                 errors=[state.pause_reason or "campaign cannot continue"],
             )
-        if state.status == "PAUSED":
+        if state.in_flight_attempt is not None:
+            if not getattr(arguments, "resume_campaign", False):
+                return _campaign_envelope(
+                    state,
+                    store,
+                    status="PAUSED",
+                    errors=[
+                        "campaign has an in-flight attempt and requires "
+                        "--resume-campaign for checkpoint reconciliation"
+                    ],
+                )
+            safe_to_continue = _reconcile_campaign_checkpoint(
+                state,
+                store,
+                evidence_root=evidence_root,
+            )
+            recovery_evidence = str(
+                getattr(arguments, "recovery_evidence", "") or ""
+            )
+            if not safe_to_continue or not recovery_evidence.strip():
+                return _campaign_envelope(
+                    state,
+                    store,
+                    status="PAUSED",
+                    errors=[state.pause_reason or "campaign recovery required"],
+                )
+            state.resume(recovery_evidence)
+            store.append_event(
+                "campaign_resumed",
+                {
+                    "recovery_evidence": state.recovery_evidence,
+                    "reconciled_attempt": True,
+                },
+            )
+        elif state.status == "PAUSED":
             if not getattr(arguments, "resume_campaign", False):
                 return _campaign_envelope(
                     state,
@@ -2151,6 +2481,8 @@ def _run_campaign(
                 errors=[state.pause_reason],
             )
         selected = eligible[candidate_index]
+        run_id = new_run_id()
+        attempt_id = new_attempt_id()
         stage_config = StageExecutionConfig(
             stage=stage,
             copilot=str(selected.strategy.strategy_id),
@@ -2179,10 +2511,11 @@ def _run_campaign(
             operbox_data=str(arguments.operbox_data or arguments.roster),
             support_unit_usage=0,
             confirm_formal_battle=True,
+            run_id=run_id,
+            attempt_id=attempt_id,
         )
         stage_config.validate()
         state.next_candidate_index[stage] = candidate_index + 1
-        store.save(state)
         store.append_event(
             "candidate_selected",
             {
@@ -2190,6 +2523,29 @@ def _run_campaign(
                 "candidate_index": candidate_index,
                 "job": str(selected.strategy.strategy_id),
                 "lineup": [asdict(slot) for slot in selected.lineup],
+            },
+        )
+        store.begin_attempt(
+            state,
+            CampaignAttempt(
+                stage=stage,
+                job=str(selected.strategy.strategy_id),
+                run_id=run_id,
+                attempt_id=attempt_id,
+                status="IN_FLIGHT",
+                outcome=None,
+                sanity_cost=next_cost,
+                formal_battle_started=False,
+            ),
+        )
+        store.append_event(
+            "attempt_started",
+            {
+                "stage": stage,
+                "job": str(selected.strategy.strategy_id),
+                "run_id": run_id,
+                "attempt_id": attempt_id,
+                "reserved_sanity": next_cost,
             },
         )
         try:
@@ -2212,28 +2568,37 @@ def _run_campaign(
             )
         data = envelope.get("data") or {}
         battle_started = bool(data.get("formal_battle_started"))
-        store.record_attempt(
+        battle_result_status = data.get("battle_result_status") or data.get(
+            "verification_status"
+        )
+        outcome = str(data.get("outcome") or "")
+        attempt_sanity_cost = (
+            0
+            if not battle_started and outcome.startswith("BLOCKED_")
+            else next_cost
+        )
+        finished = store.finish_attempt(
             state,
-            CampaignAttempt(
-                stage=stage,
-                job=str(selected.strategy.strategy_id),
-                run_id=envelope.get("run_id"),
-                attempt_id=envelope.get("attempt_id"),
-                status=str(envelope.get("status")),
-                outcome=data.get("outcome"),
-                sanity_cost=next_cost if battle_started else 0,
-                formal_battle_started=battle_started,
-                finished_at=utc_now(),
+            attempt_id,
+            status=str(envelope.get("status")),
+            outcome=data.get("outcome"),
+            sanity_cost=attempt_sanity_cost,
+            formal_battle_started=battle_started,
+            task_execution_error=bool(data.get("task_execution_error")),
+            battle_result_status=(
+                str(battle_result_status)
+                if battle_result_status is not None
+                else None
             ),
         )
         store.append_event(
             "attempt_finished",
-            asdict(state.attempts[-1]),
+            asdict(finished),
         )
         if envelope.get("status") == "SUCCEEDED":
             store.append_event(
                 "stage_succeeded",
-                {"stage": stage, "job": state.attempts[-1].job},
+                {"stage": stage, "job": finished.job},
             )
             state.stage_index += 1
             state.next_candidate_index[stage] = 0

@@ -72,3 +72,11 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass `
             -File tools\localai-workflow\localai.ps1 test-dotnet `
             -Dotnet $dotnet
+
+      - name: Build MaaCore Debug
+        shell: pwsh
+        working-directory: maa-source
+        run: |
+          cmake --preset windows-x64
+          cmake --build build --target MaaCore --config Debug `
+            --parallel $env:NUMBER_OF_PROCESSORS

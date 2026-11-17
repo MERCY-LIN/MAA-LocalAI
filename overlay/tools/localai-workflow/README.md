@@ -88,9 +88,11 @@ Evidence is stored under
 `run-stage` always requests a formal battle and sets sanity-potion use to
 `false`; it does not require or schedule a drill. A Core completion callback is
 not a clear. Only a locally verified three-star settlement can produce
-`SUCCEEDED` with a three-star verification payload. It also requires the preflight screenshot to match one of
-the known safe pages in `data/autopush/state-memory`; an unknown game state is
-reported as `BLOCKED_PREFLIGHT_STATE` without starting the battle.
+`SUCCEEDED` with a three-star verification payload. The final preflight must
+match the exact target stage-detail page in `data/autopush/state-memory`.
+Known map/home pages and another stage's detail page first require MaaCore
+navigation; an unknown state or failed target confirmation is reported as
+`BLOCKED_PREFLIGHT_STATE` without starting the battle.
 
 Task-chain callbacks are parsed by the numeric MaaCore message IDs and correlated
 by `taskid`. `TaskChainStopped`, disconnects, task errors, unknown results, and
@@ -100,6 +102,11 @@ budget exhaustion have distinct terminal phases and never become success.
 same `--campaign-id` to resume. A paused campaign additionally requires
 `--resume-campaign --recovery-evidence <id>`. An explicit failed result switches
 to the next eligible candidate; unknown or conflicting evidence pauses the queue.
+The active attempt, linked `run_id`/`attempt_id`, and sanity reservation are
+written before formal execution. Resume first reconciles that checkpoint and
+will not silently start an extra attempt. Between stages, MaaCore returns from
+the previous stage detail page, navigates the next stage, and the runner requires
+an exact target-detail preflight before any battle starts.
 
 Read the queue checkpoint without controlling the device:
 
