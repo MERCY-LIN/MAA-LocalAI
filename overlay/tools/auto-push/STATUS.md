@@ -40,6 +40,9 @@ OpenCV result verification, and auditable per-round metrics.
   non-three-star results, per-stage and total attempt limits, elapsed-time and
   sanity budgets, and atomic checkpoint recovery. The attempt and sanity cost
   are persisted before formal execution and reconciled before resume.
+- Explicit non-three-star results advance out of the settlement through
+  MaaCore before another candidate starts. Successful attempt completion and
+  stage advancement are written in one checkpoint.
 - Cross-stage campaigns return from the previous stage detail page, navigate
   through MaaCore to the next stage, and require an exact target-detail preflight.
 - Unknown, conflicting, blocked, or budget-exhausted campaign states pause the

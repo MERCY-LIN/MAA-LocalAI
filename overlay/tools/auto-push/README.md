@@ -137,7 +137,8 @@ D:\work\maa-deps\python-autopush\Scripts\python.exe -m autopush.cli run-copilot 
 
 连续推图按关卡和候选建立持久化队列。正式执行前先写入执行中尝试、关联的
 `run_id`/`attempt_id` 和理智预占，恢复时先对账。明确二星或战斗失败后自动尝试下一份
-候选；三星后返回地图、导航到下一关，并再次要求目标详情页预检。每关尝试数、
+候选，并先通过 MaaCore 离开结算页；三星成功与关卡下标在同一检查点提交。三星后
+返回地图、导航到下一关，并再次要求目标详情页预检。每关尝试数、
 总尝试数、累计时间、理智成本和总理智均有硬预算。状态保存在
 `<evidence-root>/_campaigns/<campaign_id>/state.json`，进程中断后可使用同一
 `campaign_id` 恢复。同一目录下的 `events.jsonl` 记录候选选择、尝试结果、暂停

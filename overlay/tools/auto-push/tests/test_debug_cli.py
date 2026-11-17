@@ -2,6 +2,7 @@ import json
 import sys
 import threading
 import types
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import cv2
@@ -1458,6 +1459,76 @@ def test_run_campaign_continues_across_all_stages(
     assert envelope["data"]["campaign"]["stage_index"] == 2
     assert envelope["data"]["campaign"]["status"] == "SUCCEEDED"
     assert envelope["data"]["sanity_spent"] == 42
+
+
+def test_campaign_time_budget_blocks_before_another_stage(
+    tmp_path: Path,
+    monkeypatch,
+):
+    (tmp_path / "adb.exe").write_bytes(b"adb")
+    roster = tmp_path / "OperBoxData.json"
+    roster.write_text("{}", encoding="utf-8")
+    jobs_root = tmp_path / "jobs"
+    (jobs_root / "OF-1").mkdir(parents=True)
+    evidence_root = tmp_path / "evidence"
+    store = CampaignStore(evidence_root, "campaign-time-budget")
+    state = store.create(
+        stages=["OF-1"],
+        policy=CampaignPolicy(
+            max_attempts_per_stage=1,
+            max_total_attempts=1,
+            max_elapsed_seconds=1,
+            sanity_costs={"OF-1": 21},
+            max_sanity=42,
+        ),
+    )
+    state.started_at = (datetime.now(UTC) - timedelta(seconds=10)).isoformat()
+    store.save(state)
+    monkeypatch.setattr(debug_cli, "load_roster", lambda _path: {})
+    run_stage_calls = 0
+
+    def run_stage(_config):
+        nonlocal run_stage_calls
+        run_stage_calls += 1
+        raise AssertionError("elapsed budget must stop before execution")
+
+    monkeypatch.setattr(debug_cli, "_run_stage", run_stage)
+    arguments = types.SimpleNamespace(
+        command="run-campaign",
+        confirm_formal_battle=True,
+        package_dir=str(tmp_path / "package"),
+        evidence_root=str(evidence_root),
+        dll=None,
+        resource_dir=None,
+        user_dir=None,
+        template_root=None,
+        state_memory_dir=None,
+        adb=str(tmp_path / "adb.exe"),
+        address="emulator-5554",
+        connect_config="General",
+        timeout=600,
+        verify_threshold=0.86,
+        stages=["OF-1"],
+        jobs_root=str(jobs_root),
+        roster=str(roster),
+        operbox_data=None,
+        round_name="test-campaign-time-budget",
+        campaign_id="campaign-time-budget",
+        resume_campaign=True,
+        recovery_evidence=None,
+        max_attempts_per_stage=1,
+        max_total_attempts=1,
+        max_elapsed_seconds=1,
+        max_sanity=42,
+        sanity_cost=["OF-1=21"],
+    )
+
+    envelope, exit_code = debug_cli._run_campaign(arguments)
+
+    assert exit_code == 2
+    assert envelope["status"] == "BUDGET_EXHAUSTED"
+    assert "time budget" in envelope["errors"][0]
+    assert run_stage_calls == 0
 
 
 def test_run_campaign_reconciles_interrupted_attempt_before_budget_resume(
